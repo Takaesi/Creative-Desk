@@ -266,15 +266,19 @@ app.delete('/api/tasks/:id', auth, wrap((req, res) => {
 
 // Креативщик берёт задачу (новую — себе, или свою на правках)
 app.post('/api/tasks/:id/take', auth, wrap((req, res) => {
-  const result = db.transaction(() => {
+  db.transaction(() => {
     const task = getTask(req.params.id);
     ensureAction(task, req.user, 'take');
-    const extra = { creative_id: req.user.id };
-    if (!task.taken_at) extra.taken_at = nowIso();
-    transition(task, req.user, 'in_progress', extra, task.status === 'revision' ? 'revision_started' : 'taken');
-    return { ok: true };
+    if (task.status === 'revision') {
+      // задача остаётся в колонке «Правки» до повторной сдачи; фиксируем начало доработки
+      const at = nowIso();
+      db.prepare('UPDATE tasks SET revision_started_at = ?, updated_at = ? WHERE id = ?').run(at, at, task.id);
+      logHistory({ taskId: task.id, taskTitle: task.title, userId: req.user.id, action: 'revision_started', details: { round: task.revision_count }, at });
+    } else {
+      transition(task, req.user, 'in_progress', { creative_id: req.user.id, taken_at: task.taken_at || nowIso() }, 'taken');
+    }
   })();
-  res.json(result);
+  res.json({ ok: true });
 }));
 
 app.post('/api/tasks/:id/release', auth, wrap((req, res) => {
@@ -298,7 +302,9 @@ app.post('/api/tasks/:id/submit', auth, upload.array('files', 10), wrap((req, re
     const sid = db.prepare('INSERT INTO submissions (task_id, round, creative_id, comment, links, created_at) VALUES (?,?,?,?,?,?)')
       .run(task.id, round, req.user.id, comment, links, at).lastInsertRowid;
     saveFiles(req.files, task.id, req.user.id, 'result', sid);
-    transition(task, req.user, 'review', { submitted_at: at }, 'submitted', { round, files: req.files?.length || 0, links: links ? links.split(/\s+/).length : 0 });
+    const extra = { submitted_at: at, revision_started_at: null };
+    if (!task.first_submitted_at) extra.first_submitted_at = at;
+    transition(task, req.user, 'review', extra, 'submitted', { round, files: req.files?.length || 0, links: links ? links.split(/\s+/).length : 0 });
   })();
   res.json({ ok: true });
 }));
@@ -322,7 +328,7 @@ app.post('/api/tasks/:id/revision', auth, wrap((req, res) => {
     ensureAction(task, req.user, 'revision');
     const at = nowIso();
     db.prepare("INSERT INTO comments (task_id, user_id, text, kind, created_at) VALUES (?,?,?,'revision',?)").run(task.id, req.user.id, comment, at);
-    transition(task, req.user, 'revision', { revision_count: task.revision_count + 1 }, 'revision_requested', { round: task.revision_count + 1 });
+    transition(task, req.user, 'revision', { revision_count: task.revision_count + 1, revision_started_at: null }, 'revision_requested', { round: task.revision_count + 1 });
   })();
   res.json({ ok: true });
 }));

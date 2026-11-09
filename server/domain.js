@@ -9,13 +9,15 @@ export const GEOS = ['RU', 'KZ', 'UA', 'BR', 'MX', 'IN', 'ID', 'TR', 'DE', 'PL',
 /**
  * Считает, сколько времени задача провела в каждом статусе, по истории переходов.
  * Текущий статус учитывается до `now`.
- * @returns {{byStatus: Record<string, number>, waitToTake:number|null, leadTime:number|null, workTime:number, reviewTime:number, revisionTime:number}} — значения в мс
+ * Псевдостатус revision_work — доработка: от «Начать правки» до повторной сдачи (статус при этом остаётся revision).
+ * @returns {{byStatus: Record<string, number>, waitToTake:number|null, leadTime:number|null, cycleTime:number|null, toFirstSubmit:number|null, workTime:number, reviewTime:number, revisionWaitTime:number, revisionWorkTime:number}} — значения в мс
  */
 export function computeDurations(task, statusHistory, now = Date.now()) {
-  const byStatus = Object.fromEntries(STATUSES.map((s) => [s, 0]));
+  const byStatus = Object.fromEntries([...STATUSES, 'revision_work'].map((s) => [s, 0]));
+  // revision_started не меняет статус, но делит время «Правок» на ожидание и доработку
   const events = statusHistory
-    .filter((h) => h.to_status)
-    .map((h) => ({ at: Date.parse(h.created_at), status: h.to_status }))
+    .filter((h) => h.to_status || h.action === 'revision_started')
+    .map((h) => ({ at: Date.parse(h.created_at), status: h.to_status || 'revision_work' }))
     .sort((a, b) => a.at - b.at);
 
   let cursorStatus = 'new';
@@ -33,9 +35,11 @@ export function computeDurations(task, statusHistory, now = Date.now()) {
     waitToTake: task.taken_at ? Date.parse(task.taken_at) - created : null,
     leadTime: task.completed_at ? Date.parse(task.completed_at) - created : null,
     cycleTime: task.completed_at && task.taken_at ? Date.parse(task.completed_at) - Date.parse(task.taken_at) : null,
-    workTime: byStatus.in_progress,
+    toFirstSubmit: task.first_submitted_at ? Date.parse(task.first_submitted_at) - created : null,
+    workTime: byStatus.in_progress + byStatus.revision_work,
     reviewTime: byStatus.review,
-    revisionTime: byStatus.revision,
+    revisionWaitTime: byStatus.revision,
+    revisionWorkTime: byStatus.revision_work,
   };
 }
 
@@ -59,8 +63,8 @@ export function allowedActions(task, user) {
 
   if (user.role === 'creative') {
     if (task.status === 'new') a.push('take');
-    if (isAssignee && task.status === 'revision') a.push('take');
-    if (isAssignee && task.status === 'in_progress') a.push('submit');
+    if (isAssignee && task.status === 'revision' && !task.revision_started_at) a.push('take');
+    if (isAssignee && (task.status === 'in_progress' || (task.status === 'revision' && task.revision_started_at))) a.push('submit');
     if (isAssignee && task.status === 'in_progress' && task.revision_count === 0) a.push('release');
   }
   if (canManage && task.status === 'review') a.push('accept', 'revision');

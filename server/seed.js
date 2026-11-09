@@ -107,7 +107,7 @@ export function seed() {
       let t = created;
       let status = 'new';
       let revisions = 0;
-      const state = { taken_at: null, submitted_at: null, completed_at: null, creative_id: null };
+      const state = { taken_at: null, first_submitted_at: null, submitted_at: null, revision_started_at: null, completed_at: null, creative_id: null };
       const limit = target ? Infinity : now;
       let stopped = false;
       const step = (dt) => { if (stopped) return false; t += dt; return t <= limit; };
@@ -138,21 +138,30 @@ export function seed() {
           addExpenses();
           insSub.run(taskId, revisions + 1, creative, pick(SUBMIT_TEXTS), `https://drive.google.com/drive/folders/result-${taskId}-r${revisions + 1}`, iso(t));
           state.submitted_at = t;
+          state.first_submitted_at ??= t;
+          state.revision_started_at = null;
           move('review', 'submitted', creative, { round: revisions + 1, files: 0, links: 1 });
           if (!step(between(0.3, 10) * H)) break;
           const reviewer = rand() < 0.9 ? buyer : lead;
-          if (revisions < 2 && rand() < 0.38) {
+          if (revisions < 2 && (target === 'revision' || rand() < 0.38)) {
             revisions++;
             insCom.run(taskId, reviewer, pick(REVISION_TEXTS), 'revision', iso(t));
             move('revision', 'revision_requested', reviewer, { round: revisions });
             if (!step(between(0.3, 8) * H)) break;
-            move('in_progress', 'revision_started', creative);
+            // «Начать правки» — событие без смены статуса, задача остаётся в «Правках»
+            insHist.run(taskId, title, creative, 'revision_started', null, null, JSON.stringify({ round: revisions }), iso(t));
+            state.revision_started_at = t;
           } else {
             state.completed_at = t;
             move('done', 'accepted', reviewer);
             finished = true;
           }
         }
+      }
+      if (target === 'revision' && i % 2 === 1) {
+        t += between(0.3, 3) * H;
+        insHist.run(taskId, title, creative, 'revision_started', null, null, JSON.stringify({ round: revisions }), iso(t));
+        state.revision_started_at = t;
       }
       if (target) {
         // сдвигаем всю историю задачи так, чтобы последнее событие было недавно
@@ -161,7 +170,7 @@ export function seed() {
         const sh = (col) => `${col} = shift_iso(${col}, ${shiftSec * 1000})`;
         db.prepare(`UPDATE tasks SET ${sh('created_at')}, ${sh('deadline')} WHERE id = ?`).run(taskId);
         for (const tbl of ['history', 'submissions', 'ai_expenses', 'comments']) db.prepare(`UPDATE ${tbl} SET ${sh('created_at')} WHERE task_id = ?`).run(taskId);
-        for (const k of ['taken_at', 'submitted_at', 'completed_at']) if (state[k]) state[k] -= shiftSec * 1000;
+        for (const k of ['taken_at', 'first_submitted_at', 'submitted_at', 'revision_started_at', 'completed_at']) if (state[k]) state[k] -= shiftSec * 1000;
         t -= shiftSec * 1000;
       }
       const createdFinal = Date.parse(db.prepare('SELECT created_at FROM tasks WHERE id = ?').get(taskId).created_at);
@@ -170,8 +179,9 @@ export function seed() {
         insCom.run(taskId, state.creative_id || pick(creatives), pick(COMMENTS.slice(0, 3)), 'comment', iso(ct));
         insCom.run(taskId, buyer, pick(COMMENTS.slice(3)), 'comment', iso(Math.min(now, ct + 0.5 * H)));
       }
-      db.prepare(`UPDATE tasks SET status=?, creative_id=?, taken_at=?, submitted_at=?, completed_at=?, revision_count=?, updated_at=? WHERE id=?`).run(
-        status, state.creative_id, state.taken_at && iso(state.taken_at), state.submitted_at && iso(state.submitted_at),
+      db.prepare(`UPDATE tasks SET status=?, creative_id=?, taken_at=?, first_submitted_at=?, submitted_at=?, revision_started_at=?, completed_at=?, revision_count=?, updated_at=? WHERE id=?`).run(
+        status, state.creative_id, state.taken_at && iso(state.taken_at), state.first_submitted_at && iso(state.first_submitted_at),
+        state.submitted_at && iso(state.submitted_at), state.revision_started_at && iso(state.revision_started_at),
         state.completed_at && iso(state.completed_at), revisions, iso(Math.min(t, now)), taskId
       );
     }

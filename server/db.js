@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   revision_count INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,
   taken_at       TEXT,
+  first_submitted_at TEXT,
   submitted_at   TEXT,
+  revision_started_at TEXT,
   completed_at   TEXT,
   updated_at     TEXT NOT NULL
 );
@@ -116,6 +118,14 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS idx_hist_task ON history(task_id);
 `);
+
+// Миграции для БД, созданных ранее
+const taskCols = db.prepare('PRAGMA table_info(tasks)').all().map((c) => c.name);
+if (!taskCols.includes('first_submitted_at')) {
+  db.exec('ALTER TABLE tasks ADD COLUMN first_submitted_at TEXT');
+  db.exec("UPDATE tasks SET first_submitted_at = (SELECT MIN(created_at) FROM submissions s WHERE s.task_id = tasks.id)");
+}
+if (!taskCols.includes('revision_started_at')) db.exec('ALTER TABLE tasks ADD COLUMN revision_started_at TEXT');
 
 export const nowIso = () => new Date().toISOString();
 

@@ -7,6 +7,15 @@ export const STATUS = {
 };
 export const STATUS_ORDER = ['new', 'in_progress', 'review', 'revision', 'done'];
 
+// Части времени для панели «Учёт времени»: «Правки» делятся на ожидание и доработку
+export const TIME_PARTS = [
+  { k: 'new', label: 'Ожидание взятия', color: 'var(--st-new)' },
+  { k: 'in_progress', label: 'В работе', color: 'var(--st-progress)' },
+  { k: 'review', label: 'На проверке', color: 'var(--st-review)' },
+  { k: 'revision', label: 'Правки: ожидание', color: 'var(--st-revision)' },
+  { k: 'revision_work', label: 'Правки: доработка', color: 'var(--st-revision-work)' },
+];
+
 export const PRIORITY = {
   urgent: { label: 'Срочно', cls: 'p-urgent' },
   high: { label: 'Высокий', cls: 'p-high' },

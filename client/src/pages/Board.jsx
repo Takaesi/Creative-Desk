@@ -11,9 +11,9 @@ import TaskForm from '../components/TaskForm.jsx';
 // Какое действие означает перетаскивание из колонки A в колонку B
 const DROP_ACTION = {
   'new>in_progress': 'take',
-  'revision>in_progress': 'take',
   'in_progress>new': 'release',
   'in_progress>review': 'submit',
+  'revision>review': 'submit',
   'review>done': 'accept',
   'review>revision': 'revision',
 };
@@ -72,7 +72,8 @@ export default function Board() {
   const quick = async (task, action) => {
     try {
       await api.post(`/tasks/${task.id}/${action}`);
-      toast({ take: 'Задача взята в работу', accept: 'Работа принята', release: 'Задача возвращена в «Новые»' }[action]);
+      toast(action === 'take' && task.status === 'revision' ? 'Доработка начата — задача остаётся в «Правках»'
+        : { take: 'Задача взята в работу', accept: 'Работа принята', release: 'Задача возвращена в «Новые»' }[action]);
       load();
     } catch (e) { toast(e.message, 'error'); }
   };
@@ -217,6 +218,11 @@ function TaskCard({ task: t, user, onOpen, onQuick, onIntent, onDragStart }) {
         <PriorityBadge p={t.priority} />
         {t.revision_count > 0 && <span className="badge badge-rev" title="Раундов правок"><RotateCcw size={11} /> {t.revision_count}</span>}
       </div>
+      {t.status === 'revision' && (
+        <div className={`rev-state ${t.revision_started_at ? 'rev-working' : ''}`}>
+          {t.revision_started_at ? <>Доработка идёт · {relTime(t.revision_started_at)}</> : 'Ждёт, когда креативщик возьмёт правки'}
+        </div>
+      )}
       <h4 className="card-title">{t.title}</h4>
       <div className="card-meta">
         <span className="tag">{t.creative_type} ×{t.quantity}</span>

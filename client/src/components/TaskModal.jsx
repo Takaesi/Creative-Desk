@@ -7,7 +7,7 @@ import {
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import {
-  STATUS, STATUS_ORDER, ROLE, ACTION_LABEL, FIELD_LABEL, PRIORITY, fmtDate, fmtDuration, fmtNum, fmtSize,
+  STATUS, STATUS_ORDER, TIME_PARTS, ROLE, ACTION_LABEL, FIELD_LABEL, PRIORITY, fmtDate, fmtDuration, fmtNum, fmtSize,
   deadlineInfo, splitLinks, isUrl, relTime,
 } from '../utils.js';
 import { Avatar, PriorityBadge, StatusBadge, Modal, Field, useToast } from './ui.jsx';
@@ -47,6 +47,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
             <StatusBadge s={task.status} />
             <PriorityBadge p={task.priority} />
             {task.revision_count > 0 && <span className="badge badge-rev"><RotateCcw size={11} /> правок: {task.revision_count}</span>}
+            {task.status === 'revision' && <span className="badge badge-rev">{task.revision_started_at ? 'доработка идёт' : 'ждёт доработки'}</span>}
             {dl && <span className={`badge ${dl.cls}`}>{dl.text}</span>}
           </div>
           <h2>{task.title}</h2>
@@ -58,7 +59,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
 
       <div className="tm-actions">
         {A.has('take') && (
-          <button className="btn btn-primary" onClick={() => run(() => api.post(`/tasks/${task.id}/take`), 'Задача в работе')}>
+          <button className="btn btn-primary" onClick={() => run(() => api.post(`/tasks/${task.id}/take`), task.status === 'revision' ? 'Доработка начата' : 'Задача в работе')}>
             <Play size={15} /> {task.status === 'revision' ? 'Начать правки' : 'Взять в работу'}
           </button>
         )}
@@ -214,14 +215,17 @@ function UploadRefs({ taskId, onDone }) {
 // ---------- Учёт времени ----------
 function TimePanel({ task }) {
   const d = task.durations;
+  const resubmitted = task.submitted_at && task.first_submitted_at && task.submitted_at !== task.first_submitted_at;
   const milestones = [
     { k: 'Создана', at: task.created_at },
-    { k: 'Взята в работу', at: task.taken_at, dur: d.waitToTake, durLabel: 'ожидание' },
-    { k: task.revision_count ? 'Последняя сдача' : 'Сдана на проверку', at: task.submitted_at },
+    { k: 'Взята в работу', at: task.taken_at },
+    { k: 'Первая сдача', at: task.first_submitted_at },
+    ...(resubmitted ? [{ k: 'Последняя сдача', at: task.submitted_at }] : []),
+    ...(task.status === 'revision' && task.revision_started_at ? [{ k: 'Начата доработка', at: task.revision_started_at }] : []),
     { k: 'Завершена', at: task.completed_at },
   ];
-  const parts = STATUS_ORDER.filter((s) => s !== 'done' && d.byStatus[s] > 0);
-  const total = parts.reduce((s, k) => s + d.byStatus[k], 0) || 1;
+  const parts = TIME_PARTS.filter((p) => d.byStatus[p.k] > 0);
+  const total = parts.reduce((s, p) => s + d.byStatus[p.k], 0) || 1;
   return (
     <section className="panel">
       <PanelHead icon={Timer} title="Учёт времени" />
@@ -237,13 +241,14 @@ function TimePanel({ task }) {
         <div><small>Общее время</small><b>{fmtDuration(d.leadTime ?? (Date.now() - Date.parse(task.created_at)))}</b>{!d.leadTime && <em>идёт</em>}</div>
         <div><small>В работе</small><b>{fmtDuration(d.workTime)}</b></div>
         <div><small>До взятия</small><b>{fmtDuration(d.waitToTake)}</b></div>
+        <div><small>До первой сдачи</small><b>{fmtDuration(d.toFirstSubmit)}</b></div>
       </div>
       <div className="stacked" title="Распределение времени по статусам">
-        {parts.map((s) => <i key={s} style={{ flex: d.byStatus[s] / total, background: STATUS[s].color }} />)}
+        {parts.map((p) => <i key={p.k} style={{ flex: d.byStatus[p.k] / total, background: p.color }} />)}
       </div>
       <ul className="legend">
-        {parts.map((s) => (
-          <li key={s}><i style={{ background: STATUS[s].color }} />{STATUS[s].label}<b>{fmtDuration(d.byStatus[s])}</b></li>
+        {parts.map((p) => (
+          <li key={p.k}><i style={{ background: p.color }} />{p.label}<b>{fmtDuration(d.byStatus[p.k])}</b></li>
         ))}
       </ul>
     </section>

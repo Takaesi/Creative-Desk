@@ -191,26 +191,29 @@ function WorkloadTable({ rows, showTip, hideTip }) {
         <table className="table workload">
           <thead>
             <tr>
-              <th>Креативщик</th><th>Текущая загрузка</th><th className="num">Ед. в работе</th>
-              <th className="num">Готово</th><th className="num">Просрочено</th><th className="num">Правок</th>
-              <th className="num">Ср. цикл</th><th className="num">AI-кредиты</th>
+              <th>Креативщик</th>
+              <th title="Активные задачи и единицы креативов в них">Загрузка</th>
+              <th className="num" title="Завершённые задачи (единиц креативов)">Готово</th>
+              <th className="num" title="Задачи с нарушенным дедлайном">Просроч.</th>
+              <th className="num" title="Раундов правок">Правки</th>
+              <th className="num" title="Среднее время от взятия до приёмки">Ср. цикл</th>
+              <th className="num">AI-кр.</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                <td><span className="person"><Avatar name={r.name} color={r.color} size={26} /><span><b>{r.name}</b><small className="muted">{r.position}</small></span></span></td>
+                <td><span className="person"><Avatar name={r.name} color={r.color} size={26} /><span><b>{r.name}</b><small className="muted wl-pos">{r.position}</small></span></span></td>
                 <td className="load-cell">
                   <div className="load-bar">
                     {LOAD_PARTS.filter((p) => r[p.k]).map((p) => (
                       <i key={p.k} style={{ width: `${(r[p.k] / maxActive) * 100}%`, background: p.color }}
                         onMouseMove={(e) => showTip(e, <><b>{r.name}</b><span>{p.label}: {r[p.k]}</span></>)} onMouseLeave={hideTip} />
                     ))}
-                    <span>{r.active || '0'}</span>
+                    <span title={`${r.active} задач, ${r.activeUnits} ед. креативов`}>{r.active}<small className="muted"> · {r.activeUnits} ед.</small></span>
                   </div>
                 </td>
-                <td className="num">{r.activeUnits}</td>
-                <td className="num">{r.done} <small className="muted">({r.doneUnits} ед.)</small></td>
+                <td className="num" title={`${r.doneUnits} ед. креативов`}>{r.done}</td>
                 <td className={`num ${r.overdue ? 'bad-text' : ''}`}>{r.overdue}</td>
                 <td className="num">{r.revisions}</td>
                 <td className="num">{fmtDuration(r.avgCycleTime)}</td>
@@ -290,7 +293,8 @@ function Heatmap({ ai, showTip, hideTip }) {
 /** Вертикальные столбцы по дням; 1–2 серии рядом, одна ось. */
 function DayBars({ days, keys, showTip, hideTip }) {
   const max = Math.max(1, ...days.flatMap((d) => keys.map((k) => d[k.k])));
-  const step = Math.ceil(days.length / 10);
+  // на узких экранах подписей по оси X меньше, чтобы они не налезали друг на друга
+  const step = Math.ceil(days.length / (window.innerWidth < 700 ? 4 : 10));
   const ticks = [max, Math.round(max / 2), 0];
   return (
     <>

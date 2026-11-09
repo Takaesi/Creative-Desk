@@ -111,8 +111,14 @@ try {
     assert.equal(t.status, 'revision');
     assert.equal(t.revision_count, 1);
   });
-  await step('креативщик берёт правки, расходы пишутся в раунд 1, сдаёт повторно', async () => {
+  await step('«Начать правки» оставляет задачу в «Правках» и открывает сдачу', async () => {
     assert.equal((await cr.post(`/tasks/${id}/take`)).status, 200);
+    const t = (await cr.get(`/tasks/${id}`)).body;
+    assert.equal(t.status, 'revision');
+    assert.ok(t.revision_started_at);
+    assert.ok(t.actions.includes('submit') && !t.actions.includes('take'));
+  });
+  await step('расходы на правках пишутся в раунд 1, повторная сдача', async () => {
     await cr.post(`/tasks/${id}/expenses`, { service: 'Runway', credits: 40 });
     const fd = new FormData(); fd.append('links', 'https://drive.google.com/y');
     fd.append('files', new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }), 'result.png');
@@ -121,6 +127,9 @@ try {
     assert.deepEqual(t.expenses.map((e) => e.round), [0, 0, 1]);
     assert.equal(t.submissions.length, 2);
     assert.equal(t.submissions[1].files.length, 1);
+    assert.equal(t.status, 'review');
+    assert.equal(t.revision_started_at, null);
+    assert.ok(t.first_submitted_at < t.submitted_at, 'первая сдача сохранена отдельно');
   });
   await step('байер принимает → Готово, completed_at и lead time посчитаны', async () => {
     assert.equal((await buyer.post(`/tasks/${id}/accept`)).status, 200);
@@ -129,12 +138,14 @@ try {
     assert.ok(t.completed_at);
     assert.ok(t.durations.leadTime >= 0);
     assert.ok(t.durations.byStatus.in_progress >= 0);
+    assert.ok(t.durations.toFirstSubmit >= 0);
   });
   await step('история содержит полный цикл статусов', async () => {
     const t = (await buyer.get(`/tasks/${id}`)).body;
     const transitions = t.history.filter((h) => h.to_status).map((h) => h.to_status);
-    assert.deepEqual(transitions, ['new', 'in_progress', 'review', 'revision', 'in_progress', 'review', 'done']);
+    assert.deepEqual(transitions, ['new', 'in_progress', 'review', 'revision', 'review', 'done']);
     assert.ok(t.history.some((h) => h.action === 'expense_added'));
+    assert.ok(t.history.some((h) => h.action === 'revision_started'));
   });
   await step('после завершения редактирование недоступно', async () => {
     assert.equal((await buyer.patch(`/tasks/${id}`, { title: 'x' })).status, 403);
