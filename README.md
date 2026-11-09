@@ -58,7 +58,31 @@ npm start            # http://localhost:3001 — при первом запус�
 
 ## Деплой
 
-- **Render.com:** в репозитории есть `render.yaml`. Нужно выбрать New → Blueprint и указать репозиторий.
+### Render.com
+
+Репозиторий: https://github.com/Takaesi/Creative-Desk
+
+**Вариант 1 — Blueprint** (настройки берутся из [render.yaml](render.yaml)):
+1. На [dashboard.render.com](https://dashboard.render.com) выбрать **New → Blueprint**.
+2. Подключить GitHub и выбрать репозиторий `Takaesi/Creative-Desk`.
+3. Нажать **Apply** и дождаться сборки (2–4 минуты). Сервис получит адрес вида `https://creative-desk-xxxx.onrender.com`.
+
+**Вариант 2 — вручную:** New → Web Service → репозиторий, затем:
+
+| Поле | Значение |
+|---|---|
+| Runtime | Node |
+| Build Command | `npm install && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health` |
+| Environment | `NODE_VERSION=20`, `RESEED_ON_START=1` |
+
+Особенности бесплатного плана:
+- Диск эфемерный, а сервис засыпает после 15 минут простоя. Поэтому включён `RESEED_ON_START=1`: при каждом старте создаются свежие демо-данные с актуальными датами, а изменения из прошлой сессии не сохраняются. Первое открытие после сна занимает около 30–50 секунд.
+- Чтобы данные сохранялись, нужен платный план с Persistent Disk: подключить диск к `/var/data`, задать `DATA_DIR=/var/data` и убрать `RESEED_ON_START`.
+
+### Другие варианты
+
 - **Docker:** `docker build -t creative-desk . && docker run -p 3001:3001 -v cdesk:/app/data creative-desk`.
 - Подойдёт любой хостинг с Node 20 и постоянным диском: Railway, Fly.io, VPS.
 
