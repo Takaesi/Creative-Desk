@@ -1,0 +1,15 @@
+# Blueprint для Render.com: New → Blueprint → выбрать репозиторий
+services:
+  - type: web
+    name: creative-desk
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      # на бесплатном плане диск эфемерный — пересоздаём демо-данные при каждом старте
+      - key: RESEED_ON_START
+        value: "1"
