@@ -14,5 +14,6 @@ COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/client/dist client/dist
 COPY package.json ./
 COPY server server
+COPY shared shared
 EXPOSE 3001
 CMD ["node", "server/index.js"]

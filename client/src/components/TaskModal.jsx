@@ -8,7 +8,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import {
   STATUS, STATUS_ORDER, TIME_PARTS, ROLE, ACTION_LABEL, FIELD_LABEL, PRIORITY, fmtDate, fmtDuration, fmtNum, fmtSize,
-  deadlineInfo, splitLinks, isUrl, relTime,
+  deadlineInfo, splitLinks, isUrl, relTime, DICT_ENTITY,
 } from '../utils.js';
 import { Avatar, PriorityBadge, StatusBadge, Modal, Field, useToast } from './ui.jsx';
 import TaskForm from './TaskForm.jsx';
@@ -91,12 +91,16 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
               <KV k="Оффер" v={task.offer} />
               <KV k="GEO" v={task.geo} />
               <KV k="Тип креатива" v={task.creative_type} />
-              <KV k="Количество" v={`${task.quantity} шт.`} />
+              <KV k="Количество" v={`${task.quantity} шт. · ${task.estimate_units} units`} />
+              <KV k="Подход" v={task.approach_name || <span className="muted">—</span>} />
+              <KV k="Язык" v={task.language || <span className="muted">—</span>} />
+              <KV k="Формат" v={task.format || <span className="muted">—</span>} />
               <KV k="Дедлайн" v={fmtDate(task.deadline)} />
               <KV k="Приоритет" v={PRIORITY[task.priority].label} />
               <KV k="Байер" v={<Person name={task.buyer_name} color={task.buyer_color} />} />
               <KV k="Исполнитель" v={task.creative_name ? <Person name={task.creative_name} color={task.creative_color} /> : <span className="muted">не назначен</span>} />
             </div>
+            {task.hook && <div className="desc"><b className="muted small">Хук: </b>{task.hook}</div>}
             {task.description && <div className="desc">{task.description}</div>}
           </section>
 
@@ -146,7 +150,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
       {dialog === 'revision' && <RevisionDialog task={task} onClose={() => setDialog(null)} onDone={() => after('Отправлено на правки')} />}
       {dialog === 'accept' && <AcceptDialog task={task} onClose={() => setDialog(null)} onDone={() => after('Работа принята 🎉')} onRevision={() => setDialog('revision')} />}
       {dialog === 'assign' && <AssignDialog task={task} users={users} onClose={() => setDialog(null)} onDone={() => after('Исполнитель назначен')} />}
-      {dialog === 'edit' && meta && <TaskForm meta={meta} task={task} onClose={() => setDialog(null)} onSaved={() => after('Изменения сохранены')} />}
+      {dialog === 'edit' && <TaskForm task={task} onClose={() => setDialog(null)} onSaved={() => after('Изменения сохранены')} />}
     </Modal>
   );
 }
@@ -400,6 +404,14 @@ function HistoryDetails({ h }) {
   if (h.action === 'assigned') return <small className="hist-extra">{d.prev ? `${d.prev} → ` : ''}{d.creative}</small>;
   if (h.action === 'submitted') return <small className="hist-extra">раунд {d.round}</small>;
   if (h.action === 'references_added') return <small className="hist-extra">{d.files.join(', ')}</small>;
+  if (h.action === 'dictionary_changed') {
+    return (
+      <small className="hist-extra">
+        {DICT_ENTITY[d.entity] || d.entity}{d.name ? ` «${d.name}»` : ''}{d.op === 'created' ? ' — добавлен' : ''}
+        {d.changes && Object.entries(d.changes).map(([k, v]) => <span key={k}> · {FIELD_LABEL[k] || k}: {fmtVal(k, v.from)} → {fmtVal(k, v.to)}</span>)}
+      </small>
+    );
+  }
   return null;
 }
 const fmtVal = (k, v) => {

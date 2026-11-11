@@ -58,6 +58,54 @@ try {
     const r = await buyer.post('/tasks', { offer: '', geo: 'RU', creative_type: 'Видео' });
     assert.equal(r.status, 400);
   });
+  // ---------- F1: справочники и настройки ----------
+  await step('F1: руководитель создаёт оффер, байер получает 403', async () => {
+    const r = await lead.post('/offers', { name: 'Smoke Offer', vertical: 'нутра' });
+    assert.equal(r.status, 201);
+    assert.equal((await buyer.post('/offers', { name: 'Buyer Offer' })).status, 403);
+    assert.equal((await lead.post('/offers', { name: 'Smoke Offer' })).status, 409, 'дубль оффера');
+  });
+  await step('F1: у всех задач демо-базы проставлен offer_id', async () => {
+    const tasks = (await lead.get('/tasks')).body;
+    assert.ok(tasks.every((t) => t.offer_id), 'offer_id у всех задач');
+  });
+  await step('F1: деактивированный оффер не принимается в новой задаче, старые задачи открываются', async () => {
+    const d = (await lead.get('/dictionaries')).body;
+    const offer = d.offers.find((o) => o.task_count > 0);
+    assert.equal((await lead.patch(`/offers/${offer.id}`, { is_active: false })).status, 200);
+    const r = await buyer.post('/tasks', { offer_id: offer.id, geo: 'RU', creative_type: 'Видео', deadline: new Date(Date.now() + 86400000).toISOString() });
+    assert.equal(r.status, 400);
+    const old = (await lead.get('/tasks')).body.find((t) => t.offer_id === offer.id);
+    assert.equal((await lead.get(`/tasks/${old.id}`)).status, 200);
+    await lead.patch(`/offers/${offer.id}`, { is_active: true });
+  });
+  await step('F1: PATCH /settings — неизвестный ключ и нечисловое значение → 400', async () => {
+    assert.equal((await lead.patch('/settings', { foo: 1 })).status, 400);
+    assert.equal((await lead.patch('/settings', { verdict_winner_roi: 'abc' })).status, 400);
+    assert.equal((await buyer.patch('/settings', { verdict_winner_roi: 40 })).status, 403);
+    const r = await lead.patch('/settings', { verdict_winner_roi: 30 });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.verdict_winner_roi, 30);
+  });
+  await step('F1: креативщик не видит цены AI-сервисов, байер видит', async () => {
+    const c = (await cr.get('/dictionaries')).body;
+    assert.ok(c.aiServices.length > 0 && c.aiServices.every((s) => s.credit_price_rub === undefined));
+    const b = (await buyer.get('/dictionaries')).body;
+    assert.ok(b.aiServices.every((s) => typeof s.credit_price_rub === 'number'));
+  });
+  await step('F1: ставки и WIP меняет только руководитель', async () => {
+    assert.equal((await buyer.patch('/users/5', { hourly_rate_rub: 1 })).status, 403);
+    assert.equal((await lead.patch('/users/5', { capacity_units: 0 })).status, 400);
+    assert.equal((await lead.patch('/users/5', { hourly_rate_rub: 900, wip_limit: null })).status, 200);
+  });
+  await step('F8: трудоёмкость по умолчанию — «Видео × 2» = 6 units', async () => {
+    const offerId = (await buyer.get('/dictionaries')).body.offers.find((o) => o.is_active).id;
+    const r = await buyer.post('/tasks', { offer_id: offerId, geo: 'BR', creative_type: 'Видео', quantity: 2, deadline: new Date(Date.now() + 86400000).toISOString() });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.estimate_units, 6);
+    await buyer.del(`/tasks/${r.body.id}`);
+  });
+
   await step('байер создаёт ТЗ с файлом-референсом', async () => {
     const fd = new FormData();
     Object.entries({ offer: 'Test Offer', geo: 'BR', creative_type: 'Видео', quantity: '3', priority: 'high', description: 'desc', deadline: new Date(Date.now() + 86400000).toISOString() }).forEach(([k, v]) => fd.append(k, v));
@@ -87,6 +135,7 @@ try {
   });
   await step('AI-расходы: валидация и запись (раунд 0)', async () => {
     assert.equal((await cr.post(`/tasks/${id}/expenses`, { service: 'Runway', credits: -5 })).status, 400);
+    assert.equal((await cr.post(`/tasks/${id}/expenses`, { service: 'NoSuchAI', credits: 5 })).status, 400, 'сервис не из справочника');
     assert.equal((await cr2.post(`/tasks/${id}/expenses`, { service: 'Runway', credits: 5 })).status, 403);
     const r = await cr.post(`/tasks/${id}/expenses`, { items: [{ service: 'Runway', credits: 120 }, { service: 'ElevenLabs', credits: 30 }] });
     assert.equal(r.status, 200);

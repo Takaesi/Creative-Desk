@@ -39,12 +39,24 @@ export const ACTION_LABEL = {
   expense_added: 'добавил(а) AI-расходы',
   expense_removed: 'удалил(а) AI-расход',
   references_added: 'добавил(а) референсы',
+  dictionary_changed: 'изменил(а) справочник',
+  creative_status: 'сменил(а) статус креатива',
+  creative_edited: 'изменил(а) креатив',
+  metrics_saved: 'внёс(ла) результаты',
+  metrics_deleted: 'удалил(а) результаты за день',
+  metrics_imported: 'импортировал(а) результаты из CSV',
+  template_changed: 'изменил(а) шаблон ТЗ',
 };
 
 export const FIELD_LABEL = {
   title: 'Название', offer: 'Оффер', geo: 'GEO', creative_type: 'Тип', quantity: 'Кол-во',
   description: 'Описание', references_text: 'Референсы', priority: 'Приоритет', deadline: 'Дедлайн',
+  offer_id: 'Оффер (справочник)', approach_id: 'Подход', language: 'Язык', format: 'Формат', hook: 'Хук', estimate_units: 'Трудоёмкость',
+  name: 'Название', vertical: 'Вертикаль', is_active: 'Активен', credit_price_rub: 'Цена кредита, ₽',
+  hourly_rate_rub: 'Ставка, ₽/ч', capacity_units: 'Мощность', wip_limit: 'WIP-лимит', brief_score: 'Качество ТЗ',
 };
+
+export const DICT_ENTITY = { offer: 'оффер', approach: 'подход', ai_service: 'AI-сервис', user: 'сотрудник', settings: 'пороги' };
 
 /** Человекочитаемая длительность: 2д 4ч, 3ч 15м, 12м */
 export function fmtDuration(ms) {
@@ -80,6 +92,16 @@ export function deadlineInfo(task) {
   if (left < 6 * 3600_000) return { cls: 'dl-soon', text: `осталось ${fmtDuration(left)}` };
   return { cls: 'dl-ok', text: `осталось ${fmtDuration(left)}` };
 }
+
+/** Деньги: 12 500 ₽ */
+export const fmtMoney = (n, cur = '₽') => (n == null || Number.isNaN(n) ? '—' : `${Math.round(n).toLocaleString('ru-RU')} ${cur}`);
+/** Проценты из значения в процентах, один знак: 47,2 % */
+export const fmtPct1 = (x) => (x == null || Number.isNaN(x) ? '—' : `${Number(x).toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %`);
+export const creativeCode = (id) => `CD-${id}`;
+export const PLURAL = (n, one, few, many) => {
+  const m10 = n % 10; const m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
 
 export const fmtNum = (n, d = 0) => (n == null ? '—' : Number(n).toLocaleString('ru-RU', { maximumFractionDigits: d }));
 export const fmtPct = (x) => (x == null ? '—' : `${Math.round(x * 100)}%`);

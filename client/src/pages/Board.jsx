@@ -179,8 +179,8 @@ export default function Board() {
         ))}
       </div>
 
-      {creating && meta && (
-        <TaskForm meta={meta} onClose={() => setCreating(false)} onSaved={(t) => { setCreating(false); toast('Задача создана'); load(); open(t.id); }} />
+      {creating && (
+        <TaskForm onClose={() => setCreating(false)} onSaved={(t) => { setCreating(false); toast('Задача создана'); load(); open(t.id); }} />
       )}
       {taskId && (
         <TaskModal

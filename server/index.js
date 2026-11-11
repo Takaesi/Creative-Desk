@@ -5,13 +5,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, nowIso, logHistory, UPLOAD_DIR } from './db.js';
-import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions } from './domain.js';
+import { db, nowIso, logHistory, UPLOAD_DIR, runDbMigrations } from './db.js';
+import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions, defaultUnits } from './domain.js';
+import { HttpError, wrap, auth, requireRole, upload, fixName, publicUser, idOrNull } from './http.js';
+import dictionariesRouter, { findOffer, findApproach } from './routes/dictionaries.js';
 import { buildAnalytics } from './analytics.js';
 import { seed, seedIfEmpty } from './seed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3001;
+
+runDbMigrations(AI_SERVICES);
 
 // RESEED_ON_START=1 — пересоздавать демо-данные при каждом старте (даты задач остаются «свежими»)
 if (process.env.RESEED_ON_START === '1') seed();
@@ -20,48 +24,6 @@ else seedIfEmpty();
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(file.originalname).slice(0, 12)}`),
-  }),
-  limits: { fileSize: 25 * 1024 * 1024, files: 10 },
-});
-
-// multer отдаёт имя файла в latin1 — возвращаем нормальный UTF-8 для кириллицы
-const fixName = (name) => Buffer.from(name, 'latin1').toString('utf8');
-
-// ---------- helpers ----------
-class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
-}
-const wrap = (fn) => (req, res, next) => {
-  try {
-    const r = fn(req, res, next);
-    if (r && typeof r.catch === 'function') r.catch(next);
-  } catch (e) { next(e); }
-};
-
-function parseCookies(header = '') {
-  return Object.fromEntries(header.split(';').map((p) => p.trim().split('=')).filter((p) => p[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
-}
-
-const publicUser = (u) => u && ({ id: u.id, name: u.name, email: u.email, role: u.role, position: u.position, color: u.color });
-
-function auth(req, _res, next) {
-  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const token = bearer || parseCookies(req.headers.cookie).sid;
-  if (!token) return next(new HttpError(401, 'Требуется вход'));
-  const user = db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?').get(token);
-  if (!user) return next(new HttpError(401, 'Сессия истекла'));
-  req.user = user;
-  req.token = token;
-  next();
-}
-
-const requireRole = (...roles) => (req, _res, next) =>
-  roles.includes(req.user.role) ? next() : next(new HttpError(403, 'Недостаточно прав'));
 
 function getTask(id) {
   const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
@@ -87,18 +49,20 @@ const TASK_LIST_SQL = `
   SELECT t.*,
     b.name AS buyer_name, b.color AS buyer_color,
     c.name AS creative_name, c.color AS creative_color,
+    ap.name AS approach_name,
     (SELECT COALESCE(SUM(credits),0) FROM ai_expenses e WHERE e.task_id = t.id) AS credits_total,
     (SELECT COUNT(*) FROM files f WHERE f.task_id = t.id AND f.kind='reference') AS ref_count,
     (SELECT COUNT(*) FROM comments m WHERE m.task_id = t.id) AS comment_count
   FROM tasks t
   JOIN users b ON b.id = t.buyer_id
-  LEFT JOIN users c ON c.id = t.creative_id`;
+  LEFT JOIN users c ON c.id = t.creative_id
+  LEFT JOIN approaches ap ON ap.id = t.approach_id`;
 
 function decorate(t, user) {
   return { ...t, overdue: isOverdue(t), actions: allowedActions(t, user) };
 }
 
-function taskFields(body, { partial = false } = {}) {
+function taskFields(body, { partial = false, current = null } = {}) {
   const out = {};
   const str = (k, max = 200) => {
     if (body[k] === undefined) return;
@@ -106,6 +70,38 @@ function taskFields(body, { partial = false } = {}) {
   };
   str('title'); str('offer'); str('geo', 100); str('creative_type', 60);
   str('description', 10000); str('references_text', 5000);
+  str('language', 60); str('format', 200); str('hook', 1000);
+  // Оффер: источник истины — offer_id; текст оставлен для совместимости и подставляется из справочника
+  if (body.offer_id !== undefined) {
+    const oid = idOrNull(body.offer_id);
+    if (oid == null) out.offer_id = null;
+    else {
+      const o = findOffer(oid);
+      if (!o) throw new HttpError(400, 'Оффер не найден в справочнике');
+      if (!o.is_active && current?.offer_id !== o.id) throw new HttpError(400, `Оффер «${o.name}» деактивирован`);
+      out.offer_id = o.id;
+      out.offer = o.name;
+    }
+  }
+  if (out.offer && out.offer_id === undefined) {
+    const o = db.prepare('SELECT * FROM offers WHERE name = ? COLLATE NOCASE').get(out.offer);
+    out.offer_id = o ? o.id : null;
+    if (o) out.offer = o.name;
+  }
+  if (body.approach_id !== undefined) {
+    const aid = idOrNull(body.approach_id);
+    if (aid != null) {
+      const a = findApproach(aid);
+      if (!a) throw new HttpError(400, 'Подход не найден в справочнике');
+      if (!a.is_active && current?.approach_id !== a.id) throw new HttpError(400, `Подход «${a.name}» деактивирован`);
+    }
+    out.approach_id = aid;
+  }
+  if (body.estimate_units !== undefined && body.estimate_units !== '') {
+    const u = parseInt(body.estimate_units, 10);
+    if (!Number.isFinite(u) || u < 1 || u > 1000) throw new HttpError(400, 'Трудоёмкость должна быть от 1 до 1000');
+    out.estimate_units = u;
+  }
   if (body.quantity !== undefined) {
     const q = parseInt(body.quantity, 10);
     if (!Number.isFinite(q) || q < 1 || q > 1000) throw new HttpError(400, 'Количество должно быть от 1 до 1000');
@@ -127,6 +123,7 @@ function taskFields(body, { partial = false } = {}) {
     for (const k of ['offer', 'geo', 'creative_type']) if (!out[k]) throw new HttpError(400, `Поле «${{ offer: 'Оффер', geo: 'GEO', creative_type: 'Тип креатива' }[k]}» обязательно`);
     if (!out.deadline) throw new HttpError(400, 'Укажите дедлайн');
     if (!out.title) out.title = `${out.creative_type} · ${out.offer} · ${out.geo}`;
+    if (!out.estimate_units) out.estimate_units = defaultUnits(out.creative_type, out.quantity || 1);
   } else {
     for (const k of ['offer', 'geo', 'creative_type', 'title']) if (k in out && !out[k]) throw new HttpError(400, 'Обязательные поля не могут быть пустыми');
   }
@@ -167,17 +164,20 @@ app.get('/api/demo-users', (_req, res) => {
 
 // ---------- meta ----------
 app.get('/api/meta', auth, (_req, res) => {
-  const usedServices = db.prepare('SELECT DISTINCT service FROM ai_expenses').all().map((r) => r.service);
   res.json({
     statuses: STATUSES, priorities: PRIORITIES, creativeTypes: CREATIVE_TYPES, geos: GEOS,
-    aiServices: [...new Set([...AI_SERVICES, ...usedServices])],
-    offers: db.prepare('SELECT offer, COUNT(*) c FROM tasks GROUP BY offer ORDER BY c DESC LIMIT 30').all().map((r) => r.offer),
+    aiServices: db.prepare('SELECT name FROM ai_services WHERE is_active = 1 ORDER BY name').all().map((r) => r.name),
+    offers: db.prepare('SELECT name FROM offers WHERE is_active = 1 ORDER BY name').all().map((r) => r.name),
   });
 });
 
-app.get('/api/users', auth, (_req, res) => {
-  res.json(db.prepare('SELECT id, name, email, role, position, color FROM users ORDER BY role, name').all());
+app.get('/api/users', auth, (req, res) => {
+  // ставки — денежные данные, отдаём только руководителю
+  const extra = req.user.role === 'lead' ? ', hourly_rate_rub, capacity_units, wip_limit' : ', capacity_units';
+  res.json(db.prepare(`SELECT id, name, email, role, position, color${extra} FROM users ORDER BY role, name`).all());
 });
+
+app.use('/api', dictionariesRouter);
 
 // ---------- tasks ----------
 app.get('/api/tasks', auth, wrap((req, res) => {
@@ -201,9 +201,14 @@ app.post('/api/tasks', auth, requireRole('buyer', 'lead'), upload.array('files',
   const at = nowIso();
   const id = db.transaction(() => {
     const r = db.prepare(
-      `INSERT INTO tasks (title, offer, geo, creative_type, quantity, description, references_text, priority, deadline, buyer_id, created_at, updated_at)
-       VALUES (@title, @offer, @geo, @creative_type, @quantity, @description, @references_text, @priority, @deadline, @buyer_id, @at, @at)`
-    ).run({ quantity: 1, description: '', references_text: '', priority: 'medium', ...f, buyer_id: req.user.id, at });
+      `INSERT INTO tasks (title, offer, offer_id, approach_id, geo, creative_type, quantity, description, references_text, language, format, hook,
+         estimate_units, priority, deadline, buyer_id, created_at, updated_at)
+       VALUES (@title, @offer, @offer_id, @approach_id, @geo, @creative_type, @quantity, @description, @references_text, @language, @format, @hook,
+         @estimate_units, @priority, @deadline, @buyer_id, @at, @at)`
+    ).run({
+      quantity: 1, description: '', references_text: '', priority: 'medium', language: '', format: '', hook: '', approach_id: null,
+      ...f, buyer_id: req.user.id, at,
+    });
     const taskId = r.lastInsertRowid;
     saveFiles(req.files, taskId, req.user.id, 'reference');
     logHistory({ taskId, taskTitle: f.title, userId: req.user.id, action: 'created', to: 'new', at, details: { priority: f.priority || 'medium', deadline: f.deadline, files: req.files?.length || 0 } });
@@ -240,7 +245,7 @@ app.get('/api/tasks/:id', auth, wrap((req, res) => {
 app.patch('/api/tasks/:id', auth, wrap((req, res) => {
   const task = getTask(req.params.id);
   ensureAction(task, req.user, 'edit');
-  const f = taskFields(req.body, { partial: true });
+  const f = taskFields(req.body, { partial: true, current: task });
   const changes = {};
   for (const [k, v] of Object.entries(f)) if (task[k] !== v) changes[k] = { from: task[k], to: v };
   if (Object.keys(changes).length) {
@@ -369,8 +374,10 @@ app.post('/api/tasks/:id/expenses', auth, wrap((req, res) => {
     const service = String(i?.service || '').trim().slice(0, 60);
     const credits = Number(i?.credits);
     if (!service) throw new HttpError(400, 'Укажите AI-сервис');
+    const known = db.prepare('SELECT name FROM ai_services WHERE name = ? COLLATE NOCASE AND is_active = 1').get(service);
+    if (!known) throw new HttpError(400, `AI-сервис «${service}» не найден в справочнике`);
     if (!Number.isFinite(credits) || credits <= 0 || credits > 1e6) throw new HttpError(400, 'Кредиты должны быть положительным числом');
-    return { service, credits: Math.round(credits * 100) / 100, note: String(i?.note || '').trim().slice(0, 300) };
+    return { service: known.name, credits: Math.round(credits * 100) / 100, note: String(i?.note || '').trim().slice(0, 300) };
   });
   db.transaction(() => {
     const at = nowIso();
@@ -408,6 +415,9 @@ app.get('/api/files/:id', auth, wrap((req, res) => {
   const p = path.join(UPLOAD_DIR, f.stored_name);
   if (!fs.existsSync(p)) throw new HttpError(404, 'Файл отсутствует на диске');
   res.setHeader('Content-Type', f.mime || 'application/octet-stream');
+  // загруженный пользователем SVG/HTML не должен исполнять скрипты на нашем домене
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox");
   const disp = req.query.download ? 'attachment' : 'inline';
   res.setHeader('Content-Disposition', `${disp}; filename*=UTF-8''${encodeURIComponent(f.original_name)}`);
   fs.createReadStream(p).pipe(res);

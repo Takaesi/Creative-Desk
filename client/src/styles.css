@@ -546,3 +546,26 @@ select.input { padding-right: 28px; }
   .kanban { grid-template-columns: repeat(5, 88vw); }
 }
 .tm-actions:not(:has(button)) { display: none; }
+
+/* ---------- v2: настройки и формы ---------- */
+.tabs-page { margin: 0 0 14px; overflow-x: auto; flex-wrap: nowrap; }
+.tabs-page button { white-space: nowrap; }
+.edit-cell { border: 1px dashed transparent; background: none; padding: 3px 6px; margin: -3px -6px; border-radius: 6px; text-align: left; font-variant-numeric: tabular-nums; max-width: 100%; }
+.edit-cell:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.edit-cell-form { display: inline-flex; align-items: center; gap: 4px; }
+.edit-cell-form .input { width: 160px; }
+.row-muted td { opacity: .55; }
+.inline-add { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.inline-add .input { flex: 1 1 180px; width: auto; }
+.switch { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; font-size: 12.5px; color: var(--muted); user-select: none; }
+.switch input { display: none; }
+.switch i { width: 30px; height: 18px; border-radius: 9px; background: var(--border-strong); position: relative; transition: background .15s; flex-shrink: 0; }
+.switch i::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch.on i { background: var(--success); }
+.switch.on i::after { transform: translateX(12px); }
+.switch.on { color: var(--text-2); }
+.thresholds { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+.threshold { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; }
+.threshold .input { width: 110px; }
+.form-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.input-bad { border-color: var(--warn); }

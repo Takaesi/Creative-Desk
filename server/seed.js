@@ -2,7 +2,10 @@
 // Запуск вручную: `npm run seed` (пересоздаёт данные). При старте сервера вызывается seedIfEmpty().
 import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';
-import { db } from './db.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { db, UPLOAD_DIR, SETTINGS_SCHEMA } from './db.js';
+import { defaultUnits, scoreBrief } from './domain.js';
 
 const H = 3600_000;
 const DEMO_PASSWORD = 'demo123';
@@ -18,7 +21,35 @@ const USERS = [
   { name: 'Никита Волков', email: 'creative4@demo.ru', role: 'creative', position: 'AI-видео / UGC', color: '#6366f1' },
 ];
 
-const OFFERS = ['LuckyBox Casino', 'SlimFit Keto', 'CryptoNova', 'HairPro Max', 'Joint Relax', 'VPN Shield', 'FitTrack App', 'Bet Arena', 'Dental White', 'Sugar Balance'];
+const OFFERS = [
+  { name: 'KetoSlim', vertical: 'нутра' }, { name: 'JointFlex', vertical: 'нутра' }, { name: 'LuckySpin', vertical: 'гемблинг' },
+  { name: 'CreditFast', vertical: 'финансы' }, { name: 'SmartWatch X', vertical: 'e-com' }, { name: 'VPN Shield', vertical: 'утилиты' },
+];
+const APPROACHES = [
+  { name: 'Боль', description: 'Начинаем с проблемы зрителя и обостряем её' },
+  { name: 'Отзыв / UGC', description: 'Живой человек рассказывает о своём опыте' },
+  { name: 'До/после', description: 'Наглядный контраст результата' },
+  { name: 'Новость / сенсация', description: 'Подача как новостной сюжет или срочное сообщение' },
+  { name: 'Эксперт', description: 'Врач, юрист, профи рекомендует продукт' },
+  { name: 'Дефицит / таймер', description: 'Ограниченное предложение, обратный отсчёт' },
+  { name: 'Юмор / мем', description: 'Мем-формат, неожиданная шутка' },
+  { name: 'Сравнение', description: 'Мы против конкурента / обычного способа' },
+];
+const AI_PRICES = { Midjourney: 4, Runway: 6, Kling: 5, Sora: 9, ElevenLabs: 2, HeyGen: 12, ChatGPT: 1, Claude: 1, 'Stable Diffusion': 0.5, Suno: 3, Leonardo: 2, Pika: 4 };
+const CREATIVE_PARAMS = [ // ставка ₽/ч, мощность, WIP-лимит (null — по умолчанию)
+  { rate: 900, capacity: 10, wip: null }, { rate: 1100, capacity: 12, wip: null }, { rate: 650, capacity: 8, wip: 2 }, { rate: 1200, capacity: 10, wip: null },
+];
+const LANG = { RU: 'русский', KZ: 'русский', BR: 'португальский', MX: 'испанский', ES: 'испанский', DE: 'немецкий', PL: 'польский', US: 'EN', IN: 'EN', PH: 'EN', TR: 'турецкий', IT: 'итальянский', ID: 'индонезийский' };
+const HOOKS = {
+  'Боль': 'Крупный план: человек морщится от проблемы, текст «Знакомо?»',
+  'Отзыв / UGC': 'Селфи-видео: «Я не верила, пока не попробовала сама…»',
+  'До/после': 'Сплит-экран до/после в первую секунду',
+  'Новость / сенсация': 'Плашка «Срочно» и ведущая новостей',
+  'Эксперт': 'Врач в халате: «Я запрещаю пациентам…»',
+  'Дефицит / таймер': 'Таймер 00:59 и «осталось 12 штук»',
+  'Юмор / мем': 'Мем-шаблон с неожиданным поворотом на 2-й секунде',
+  'Сравнение': 'Две руки: обычный способ против нашего',
+};
 const GEOS = ['RU', 'KZ', 'BR', 'MX', 'IN', 'TR', 'DE', 'PL', 'US', 'ES', 'IT', 'ID', 'PH'];
 const TYPES = {
   'Видео': { services: ['Runway', 'Kling', 'ElevenLabs', 'Midjourney'], creatives: [1, 3] },
@@ -28,7 +59,6 @@ const TYPES = {
   'Анимация': { services: ['Runway', 'Pika', 'Midjourney'], creatives: [0, 1] },
   'Плейабл': { services: ['ChatGPT', 'Claude', 'Midjourney'], creatives: [0] },
 };
-const ANGLES = ['до/после', 'отзыв врача', 'новостной формат', 'испуг/боль', 'big win', 'скидка −50%', 'история пользователя', 'сравнение с конкурентом', 'стрим-нарезка', 'уведомление на телефоне'];
 const REVISION_TEXTS = [
   'Хук слишком медленный — первые 2 секунды должны цеплять, сделай резкий старт.',
   'Поменяй CTA на «Забери бонус», и кнопку крупнее. Логотип оффера убрать — модерация режет.',
@@ -60,8 +90,19 @@ export function seed() {
 
   db.function('shift_iso', (v, ms) => (v ? new Date(Date.parse(v) - ms).toISOString() : null));
   db.transaction(() => {
-    for (const t of ['history', 'comments', 'ai_expenses', 'files', 'submissions', 'tasks', 'sessions', 'users']) db.exec(`DELETE FROM ${t}`);
+    // старые загруженные файлы демо больше не нужны
+    for (const f of db.prepare('SELECT stored_name FROM files').all()) fs.rmSync(path.join(UPLOAD_DIR, f.stored_name), { force: true });
+    db.exec('UPDATE tasks SET parent_creative_id = NULL, template_id = NULL');
+    for (const t of ['history', 'creative_metrics', 'creatives', 'comments', 'ai_expenses', 'files', 'submissions', 'tasks', 'brief_templates',
+      'sessions', 'users', 'offers', 'approaches', 'ai_services', 'settings']) db.exec(`DELETE FROM ${t}`);
     db.exec("DELETE FROM sqlite_sequence");
+
+    const insSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+    Object.entries(SETTINGS_SCHEMA).forEach(([k, v]) => insSetting.run(k, v.def));
+    const dictAt = iso(now - 40 * 24 * H);
+    const offerIds = OFFERS.map((o) => db.prepare('INSERT INTO offers (name, vertical, created_at) VALUES (?,?,?)').run(o.name, o.vertical, dictAt).lastInsertRowid);
+    const approachIds = APPROACHES.map((a) => db.prepare('INSERT INTO approaches (name, description, created_at) VALUES (?,?,?)').run(a.name, a.description, dictAt).lastInsertRowid);
+    Object.entries(AI_PRICES).forEach(([name, price]) => db.prepare('INSERT INTO ai_services (name, credit_price_rub) VALUES (?,?)').run(name, price));
 
     const hash = bcrypt.hashSync(DEMO_PASSWORD, 8);
     const insUser = db.prepare('INSERT INTO users (name, email, password_hash, role, position, color) VALUES (?,?,?,?,?,?)');
@@ -69,20 +110,27 @@ export function seed() {
     const buyers = ids.filter((_, i) => USERS[i].role === 'buyer');
     const creatives = ids.filter((_, i) => USERS[i].role === 'creative');
     const lead = ids[0];
+    creatives.forEach((id, k) => db.prepare('UPDATE users SET hourly_rate_rub = ?, capacity_units = ?, wip_limit = ? WHERE id = ?')
+      .run(CREATIVE_PARAMS[k].rate, CREATIVE_PARAMS[k].capacity, CREATIVE_PARAMS[k].wip, id));
 
-    const insTask = db.prepare(`INSERT INTO tasks (title, offer, geo, creative_type, quantity, description, references_text, priority, deadline, status, buyer_id, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,'new',?,?,?)`);
+    const insTask = db.prepare(`INSERT INTO tasks (title, offer, offer_id, approach_id, geo, creative_type, quantity, description, references_text,
+        language, format, hook, estimate_units, priority, deadline, status, buyer_id, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?,?)`);
     const insHist = db.prepare('INSERT INTO history (task_id, task_title, user_id, action, from_status, to_status, details, created_at) VALUES (?,?,?,?,?,?,?,?)');
-    const insSub = db.prepare('INSERT INTO submissions (task_id, round, creative_id, comment, links, created_at) VALUES (?,?,?,?,?,?)');
+    const insSub = db.prepare('INSERT INTO submissions (task_id, round, creative_id, comment, links, hours_spent, created_at) VALUES (?,?,?,?,?,?,?)');
     const insExp = db.prepare('INSERT INTO ai_expenses (task_id, user_id, service, credits, round, note, created_at) VALUES (?,?,?,?,?,?,?)');
     const insCom = db.prepare('INSERT INTO comments (task_id, user_id, text, kind, created_at) VALUES (?,?,?,?,?)');
 
     const N = 46;
     for (let i = 0; i < N; i++) {
       const type = pick(Object.keys(TYPES));
-      const offer = pick(OFFERS);
+      const offerIdx = Math.floor(rand() * OFFERS.length);
+      const offer = OFFERS[offerIdx].name;
       const geo = rand() < 0.2 ? `${pick(GEOS)}, ${pick(GEOS)}` : pick(GEOS);
-      const angle = pick(ANGLES);
+      const apIdx = Math.floor(rand() * APPROACHES.length);
+      const angle = APPROACHES[apIdx].name;
+      // качество ТЗ: от него зависит вероятность правок — чтобы связь была видна в аналитике
+      const quality = rand() < 0.55 ? 'good' : rand() < 0.5 ? 'mid' : 'bad';
       const qty = type === 'Статика' || type === 'Баннер' ? Math.ceil(between(3, 10)) : Math.ceil(between(1, 4));
       const priority = rand() < 0.12 ? 'urgent' : rand() < 0.3 ? 'high' : rand() < 0.75 ? 'medium' : 'low';
       const buyer = pick(buyers);
@@ -93,11 +141,22 @@ export function seed() {
       const created = target ? now - 200 * H : now - between(72, 30 * 24) * H;
       const deadlineH = { urgent: between(8, 20), high: between(18, 48), medium: between(36, 96), low: between(72, 168) }[priority];
       const deadline = created + deadlineH * H;
-      const title = `${type}: ${offer} — ${angle}`;
-      const description = `Нужно ${qty} шт. «${type.toLowerCase()}» под ${offer} на ГЕО ${geo}.\nУгол: ${angle}.\nФормат: ${type === 'Видео' || type === 'UGC' ? '9:16, 15–30 сек, субтитры на языке ГЕО' : '1080×1080 и 1080×1920'}.\nБез запрещённых обещаний, логотипы платформ не использовать.`;
-      const refs = `https://www.facebook.com/ads/library/?id=${Math.floor(between(1e14, 9e14))}\nhttps://drive.google.com/drive/folders/demo-ref-${i + 1}`;
+      const title = `${type}: ${offer} — ${angle.toLowerCase()}`;
+      const isVideo = ['Видео', 'UGC', 'Анимация'].includes(type);
+      const format = quality === 'bad' ? '' : isVideo ? '9:16, 1080×1920, 15–30 сек' : '1080×1080 и 1080×1920';
+      const description = quality === 'bad'
+        ? `${qty} шт. под ${offer}, ${geo}.`
+        : `Нужно ${qty} шт. «${type.toLowerCase()}» под ${offer} на ГЕО ${geo}.\nПодход: ${angle}.\n${isVideo ? 'Субтитры на языке ГЕО, CTA в конце.' : 'Крупный оффер, контрастная кнопка.'}\nБез запрещённых обещаний, логотипы платформ не использовать.`;
+      const refs = quality === 'bad' ? '' : `https://www.facebook.com/ads/library/?id=${Math.floor(between(1e14, 9e14))}${quality === 'good' ? `\nhttps://drive.google.com/drive/folders/demo-ref-${i + 1}` : ''}`;
+      const hook = quality === 'good' ? HOOKS[angle] : '';
+      const language = quality === 'bad' ? '' : LANG[geo.split(',')[0].trim()] || 'EN';
+      const approachId = quality === 'bad' ? null : approachIds[apIdx];
+      const units = defaultUnits(type, qty);
 
-      const taskId = insTask.run(title, offer, geo, type, qty, description, refs, priority, iso(deadline), buyer, iso(created), iso(created)).lastInsertRowid;
+      const taskId = insTask.run(title, offer, offerIds[offerIdx], approachId, geo, type, qty, description, refs, language, format, hook, units,
+        priority, iso(deadline), buyer, iso(created), iso(created)).lastInsertRowid;
+      const brief = scoreBrief({ offer_id: offerIds[offerIdx], description, hook, approach_id: approachId, references_text: refs, language, format, creative_type: type, deadline: iso(deadline), created_at: iso(created), priority });
+      db.prepare('UPDATE tasks SET brief_score = ? WHERE id = ?').run(brief.score, taskId);
       insHist.run(taskId, title, buyer, 'created', null, 'new', JSON.stringify({ priority, deadline: iso(deadline) }), iso(created));
 
       // ---- симуляция жизненного цикла с обрезкой по «сейчас» ----
@@ -136,14 +195,16 @@ export function seed() {
         while (!finished && !stopped) {
           if (!step(between(2, revisions ? 10 : 30) * H * speed)) break;
           addExpenses();
-          insSub.run(taskId, revisions + 1, creative, pick(SUBMIT_TEXTS), `https://drive.google.com/drive/folders/result-${taskId}-r${revisions + 1}`, iso(t));
+          const hours = Math.round(between(1, revisions ? 4 : 8) * 2) / 2;
+          insSub.run(taskId, revisions + 1, creative, pick(SUBMIT_TEXTS), `https://drive.google.com/drive/folders/result-${taskId}-r${revisions + 1}`, hours, iso(t));
           state.submitted_at = t;
           state.first_submitted_at ??= t;
           state.revision_started_at = null;
           move('review', 'submitted', creative, { round: revisions + 1, files: 0, links: 1 });
           if (!step(between(0.3, 10) * H)) break;
           const reviewer = rand() < 0.9 ? buyer : lead;
-          if (revisions < 2 && (target === 'revision' || rand() < 0.38)) {
+          const revP = { good: 0.18, mid: 0.4, bad: 0.65 }[quality];
+          if (revisions < 2 && (target === 'revision' || rand() < revP)) {
             revisions++;
             insCom.run(taskId, reviewer, pick(REVISION_TEXTS), 'revision', iso(t));
             move('revision', 'revision_requested', reviewer, { round: revisions });

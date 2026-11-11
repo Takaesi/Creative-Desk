@@ -75,3 +75,48 @@ export function allowedActions(task, user) {
   if (canManage && task.status !== 'done') a.push('upload_reference');
   return a;
 }
+
+// ---------- v2 ----------
+export { TYPE_UNITS, defaultUnits, scoreBrief } from '../shared/brief.js';
+
+export const CREATIVE_STATUSES = ['draft', 'superseded', 'accepted', 'in_test', 'winner', 'average', 'loser', 'burned', 'archived'];
+export const VERDICTS = ['winner', 'average', 'loser'];
+/** Статусы, в которых креатив «жив» после приёмки: в них можно вносить метрики. */
+export const METRIC_STATUSES = ['accepted', 'in_test', 'winner', 'average', 'loser', 'burned'];
+
+const CREATIVE_TRANSITIONS = {
+  draft: ['superseded', 'accepted'],
+  accepted: ['in_test', 'archived'],
+  in_test: ['winner', 'average', 'loser', 'archived'],
+  winner: ['average', 'loser', 'burned', 'archived'],
+  average: ['winner', 'loser', 'archived'],
+  loser: ['winner', 'average', 'archived'],
+  burned: ['archived'],
+  superseded: [],
+  archived: [], // возврат — отдельным действием restore в предыдущий статус
+};
+
+export function canTransitionCreative(from, to) {
+  return (CREATIVE_TRANSITIONS[from] || []).includes(to);
+}
+
+/** «Свой» креатив для байера — где он байер; руководитель управляет всеми. */
+export function canManageCreative(creative, user) {
+  return user.role === 'lead' || (user.role === 'buyer' && creative.buyer_id === user.id);
+}
+
+/** Список действий над креативом, доступных пользователю. Сервер проверяет по нему права, клиент — показывает кнопки. */
+export function allowedCreativeActions(creative, user) {
+  const a = ['download'];
+  if (!canManageCreative(creative, user)) return a;
+  const s = creative.status;
+  if (!['superseded'].includes(s)) a.push('edit');
+  if (METRIC_STATUSES.includes(s)) a.push('metrics');
+  if (s === 'accepted') a.push('in_test');
+  if (['in_test', 'winner', 'average', 'loser'].includes(s)) VERDICTS.forEach((v) => v !== s && a.push(v));
+  if (s === 'winner') a.push('burned');
+  if (!['draft', 'superseded', 'archived'].includes(s)) a.push('archive');
+  if (s === 'archived') a.push('restore');
+  if (['winner', 'average', 'burned'].includes(s)) a.push('variations');
+  return a;
+}
