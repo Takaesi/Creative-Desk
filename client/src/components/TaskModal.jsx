@@ -8,7 +8,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import {
   STATUS, STATUS_ORDER, TIME_PARTS, ROLE, ACTION_LABEL, FIELD_LABEL, PRIORITY, fmtDate, fmtDuration, fmtNum, fmtSize,
-  deadlineInfo, splitLinks, isUrl, relTime, DICT_ENTITY,
+  deadlineInfo, splitLinks, isUrl, relTime, DICT_ENTITY, CREATIVE_STATUS,
 } from '../utils.js';
 import { Avatar, PriorityBadge, StatusBadge, Modal, Field, useToast } from './ui.jsx';
 import TaskForm from './TaskForm.jsx';
@@ -124,8 +124,8 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
                     <span className="muted small">{s.creative_name} · {fmtDate(s.created_at)}</span>
                   </div>
                   {s.comment && <p className="round-text">{s.comment}</p>}
-                  <LinkList text={s.links} />
-                  <FileList files={s.files} preview />
+                  {s.hours_spent > 0 && <p className="muted small">Потрачено {fmtNum(s.hours_spent, 1)} ч</p>}
+                  {s.creatives?.length ? <SubmissionCreatives items={s.creatives} /> : <><LinkList text={s.links} /><FileList files={s.files} preview /></>}
                 </div>
               ))}
             </div>
@@ -196,6 +196,26 @@ function FileList({ files, preview }) {
           <span><b>{f.original_name}</b><small>{fmtSize(f.size)} · {f.uploader}</small></span>
           <Download size={14} className="muted" />
         </a>
+      ))}
+    </div>
+  );
+}
+
+/** Креативы сдачи: превью, код CD-…, версия и переход в библиотеку. */
+function SubmissionCreatives({ items }) {
+  return (
+    <div className="sub-creatives">
+      {items.map((c) => (
+        <div key={c.id} className="sub-cr">
+          <a className="sub-cr-thumb" href={c.file_id ? `/api/files/${c.file_id}` : c.link} target="_blank" rel="noreferrer" title="Открыть файл">
+            {c.file_mime?.startsWith('image/') ? <img src={`/api/files/${c.file_id}`} alt="" /> : c.link ? <Link2 size={18} /> : <FileText size={18} />}
+          </a>
+          <span className="sub-cr-info">
+            <b title={c.title}>{c.title}</b>
+            <small><span className="card-id">{c.code}</span> · №{c.slot} v{c.version}{c.status === 'superseded' ? ' · заменён новой версией' : ''}</small>
+          </span>
+          <Link to={`/library/${c.id}`} className="link-btn">Открыть в библиотеке</Link>
+        </div>
       ))}
     </div>
   );
@@ -373,7 +393,7 @@ export function HistoryList({ items, showTask }) {
           <div>
             <p>
               <b>{h.user_name || 'Система'}</b> {ACTION_LABEL[h.action] || h.action}
-              {showTask && h.task_title && <> · {h.task_id ? <Link to={`/board/${h.task_id}`}>#{h.task_id} {h.task_title}</Link> : <span className="muted">{h.task_title}</span>}</>}
+              {showTask && h.task_title && !h.creative_id && <> · {h.task_id ? <Link to={`/board/${h.task_id}`}>#{h.task_id} {h.task_title}</Link> : <span className="muted">{h.task_title}</span>}</>}
               {h.from_status && h.to_status && (
                 <span className="hist-status"><StatusBadge s={h.from_status} /> → <StatusBadge s={h.to_status} /></span>
               )}
@@ -402,8 +422,24 @@ function HistoryDetails({ h }) {
   if (h.action === 'expense_added') return <small className="hist-extra">{d.items.map((i) => `${i.service}: ${i.credits}`).join(', ')}{d.round ? ` (правки №${d.round})` : ''}</small>;
   if (h.action === 'expense_removed') return <small className="hist-extra">{d.service}: {d.credits}</small>;
   if (h.action === 'assigned') return <small className="hist-extra">{d.prev ? `${d.prev} → ` : ''}{d.creative}</small>;
-  if (h.action === 'submitted') return <small className="hist-extra">раунд {d.round}</small>;
+  if (h.action === 'submitted') return <small className="hist-extra">раунд {d.round}{d.hours != null ? ` · ${fmtNum(d.hours, 1)} ч` : ''}</small>;
   if (h.action === 'references_added') return <small className="hist-extra">{d.files.join(', ')}</small>;
+  if (['creative_status', 'creative_edited', 'creative_created'].includes(h.action)) {
+    const cl = h.creative_id ? <Link to={`/library/${h.creative_id}`}>{d.code}</Link> : d.code;
+    if (h.action === 'creative_created') return <small className="hist-extra">{cl} · №{d.slot} v{d.version}</small>;
+    if (h.action === 'creative_edited') return <small className="hist-extra">{cl}{Object.entries(d.changes || {}).map(([k, v]) => <span key={k}> · {FIELD_LABEL[k] || k}: {fmtVal(k, v.from)} → {fmtVal(k, v.to)}</span>)}</small>;
+    return (
+      <small className="hist-extra">
+        {cl} · {CREATIVE_STATUS[d.from]?.label || d.from} → <b>{CREATIVE_STATUS[d.to]?.label || d.to}</b>{d.auto ? ' (автоматически)' : ''}
+        {d.suggested && d.suggested !== d.to ? ` · система предлагала «${CREATIVE_STATUS[d.suggested]?.label}»` : ''}
+      </small>
+    );
+  }
+  if (h.action === 'creatives_accepted') return <small className="hist-extra">приняты: {d.codes.join(', ')}</small>;
+  if (['metrics_saved', 'metrics_deleted'].includes(h.action)) {
+    return <small className="hist-extra">{h.creative_id ? <Link to={`/library/${h.creative_id}`}>{d.code}</Link> : d.code} · {d.date}{d.row ? ` · расход ${fmtNum(d.row.spend, 2)}, доход ${fmtNum(d.row.revenue, 2)}` : ''}</small>;
+  }
+  if (h.action === 'metrics_imported') return <small className="hist-extra">добавлено {d.added}, обновлено {d.updated} · креативов: {d.creatives.length}</small>;
   if (h.action === 'dictionary_changed') {
     return (
       <small className="hist-extra">
@@ -429,9 +465,19 @@ function SubmitDialog({ task, meta, onClose, onDone }) {
   const [links, setLinks] = useState('');
   const [files, setFiles] = useState([]);
   const [exp, setExp] = useState([{ service: '', credits: '' }]);
+  const [hours, setHours] = useState('');
+  const [targets, setTargets] = useState({});
   const [busy, setBusy] = useState(false);
+  const slots = task.slots || [];
+  // элементы сдачи в том же порядке, что и на сервере: файлы, затем ссылки
+  const items = [...files.map((f) => ({ name: f.name })), ...splitLinks(links).map((l) => ({ name: l }))];
+  const targetOf = (i) => targets[i] ?? (slots[i] ? String(slots[i].slot) : 'new');
+  const dupTargets = items.map((_, i) => targetOf(i)).filter((t) => t !== 'new');
+  const hasDup = new Set(dupTargets).size !== dupTargets.length;
   const submit = async () => {
     if (!links.trim() && !files.length) return toast('Прикрепите файлы или ссылку на результат', 'error');
+    if (hours === '' || Number(hours) < 0) return toast('Укажите, сколько часов ушло на этот раунд', 'error');
+    if (hasDup) return toast('Для одного креатива выбрано несколько новых версий', 'error');
     setBusy(true);
     try {
       const items = exp.filter((r) => r.service && r.credits);
@@ -439,6 +485,8 @@ function SubmitDialog({ task, meta, onClose, onDone }) {
       const fd = new FormData();
       fd.append('comment', comment);
       fd.append('links', links);
+      fd.append('hours_spent', hours);
+      if (slots.length) fd.append('slot_map', JSON.stringify(items.map((_, i) => { const t = targetOf(i); return t === 'new' ? 'new' : Number(t); })));
       files.forEach((f) => fd.append('files', f));
       await api.post(`/tasks/${task.id}/submit`, fd);
       onDone();
@@ -459,6 +507,33 @@ function SubmitDialog({ task, meta, onClose, onDone }) {
           </label>
           {files.length > 0 && <div className="file-list">{files.map((f, i) => <span key={i} className="file-chip">{f.name}<small>{fmtSize(f.size)}</small><button type="button" onClick={() => setFiles(files.filter((_, j) => j !== i))}><X size={12} /></button></span>)}</div>}
         </div>
+        {slots.length > 0 && items.length > 0 && (
+          <div className="field">
+            <span className="field-label">Что это за файлы?</span>
+            <div className="slot-thumbs">
+              {slots.map((c) => (
+                <span key={c.id} className="slot-thumb" title={`${c.code} · ${c.title}`}>
+                  {c.file_mime?.startsWith('image/') ? <img src={`/api/files/${c.file_id}`} alt="" /> : <Link2 size={14} />}
+                  <b>№{c.slot}</b>
+                </span>
+              ))}
+            </div>
+            {items.map((it, i) => (
+              <div key={i} className="slot-map-row">
+                <span className="slot-map-name" title={it.name}>{it.name}</span>
+                <select className="input input-sm" value={targetOf(i)} onChange={(e) => setTargets({ ...targets, [i]: e.target.value })}>
+                  {slots.map((c) => <option key={c.id} value={c.slot}>Новая версия креатива №{c.slot} ({c.code})</option>)}
+                  <option value="new">Новый креатив</option>
+                </select>
+              </div>
+            ))}
+            {hasDup && <span className="form-error small">Один креатив выбран дважды</span>}
+            <span className="field-hint">Креативы, для которых новой версии нет, при приёмке тоже будут приняты.</span>
+          </div>
+        )}
+        <Field label="Часов потрачено на этот раунд" required hint="Чистое рабочее время — нужно для себестоимости">
+          <input className="input" type="number" min="0" step="0.5" value={hours} onChange={(e) => setHours(e.target.value)} placeholder="Напр. 3,5" />
+        </Field>
         <Field label="Комментарий для байера">
           <textarea className="input" rows={2} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Что сделано, на что обратить внимание" />
         </Field>
@@ -510,8 +585,7 @@ function AcceptDialog({ task, onClose, onDone, onRevision }) {
         <div className="round">
           <div className="round-head"><b>Сдача №{last.round}</b><span className="muted small">{last.creative_name} · {fmtDate(last.created_at)}</span></div>
           {last.comment && <p className="round-text">{last.comment}</p>}
-          <LinkList text={last.links} />
-          <FileList files={last.files} preview />
+          {last.creatives?.length ? <SubmissionCreatives items={last.creatives} /> : <><LinkList text={last.links} /><FileList files={last.files} preview /></>}
         </div>
       ) : <p className="muted">Нет сданных материалов</p>}
       <Field label="Комментарий (необязательно)" className="mt">

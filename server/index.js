@@ -9,6 +9,8 @@ import { db, nowIso, logHistory, UPLOAD_DIR, runDbMigrations } from './db.js';
 import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions, defaultUnits } from './domain.js';
 import { HttpError, wrap, auth, requireRole, upload, fixName, publicUser, idOrNull } from './http.js';
 import dictionariesRouter, { findOffer, findApproach } from './routes/dictionaries.js';
+import creativesRouter from './routes/creatives.js';
+import { submissionItems, createCreativesForSubmission, acceptTaskCreatives, migrateLegacyCreatives, code } from './creatives.js';
 import { buildAnalytics } from './analytics.js';
 import { seed, seedIfEmpty } from './seed.js';
 
@@ -16,6 +18,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3001;
 
 runDbMigrations(AI_SERVICES);
+const migrated = migrateLegacyCreatives();
+if (migrated) console.log(`Миграция: создано креативов из старых сдач — ${migrated}`);
 
 // RESEED_ON_START=1 — пересоздавать демо-данные при каждом старте (даты задач остаются «свежими»)
 if (process.env.RESEED_ON_START === '1') seed();
@@ -178,6 +182,7 @@ app.get('/api/users', auth, (req, res) => {
 });
 
 app.use('/api', dictionariesRouter);
+app.use('/api', creativesRouter);
 
 // ---------- tasks ----------
 app.get('/api/tasks', auth, wrap((req, res) => {
@@ -222,12 +227,16 @@ app.get('/api/tasks/:id', auth, wrap((req, res) => {
   if (!task) throw new HttpError(404, 'Задача не найдена');
   const history = db.prepare(
     `SELECT h.*, u.name AS user_name, u.color AS user_color, u.role AS user_role FROM history h LEFT JOIN users u ON u.id = h.user_id
-     WHERE h.task_id = ? ORDER BY h.created_at, h.id`
+     WHERE h.task_id = ? AND h.creative_id IS NULL ORDER BY h.created_at, h.id`
   ).all(task.id).map((h) => ({ ...h, details: h.details ? JSON.parse(h.details) : null }));
   const files = db.prepare('SELECT f.*, u.name AS uploader FROM files f JOIN users u ON u.id = f.uploaded_by WHERE f.task_id = ? ORDER BY f.id').all(task.id);
+  const creatives = db.prepare(
+    `SELECT c.id, c.submission_id, c.file_id, c.link, c.title, c.slot, c.version, c.status, f.mime AS file_mime
+     FROM creatives c LEFT JOIN files f ON f.id = c.file_id WHERE c.task_id = ? ORDER BY c.slot, c.version`
+  ).all(task.id).map((c) => ({ ...c, code: code(c.id) }));
   const submissions = db.prepare(
     'SELECT s.*, u.name AS creative_name FROM submissions s JOIN users u ON u.id = s.creative_id WHERE s.task_id = ? ORDER BY s.round'
-  ).all(task.id).map((s) => ({ ...s, files: files.filter((f) => f.submission_id === s.id) }));
+  ).all(task.id).map((s) => ({ ...s, files: files.filter((f) => f.submission_id === s.id), creatives: creatives.filter((c) => c.submission_id === s.id) }));
   const expenses = db.prepare(
     'SELECT e.*, u.name AS user_name FROM ai_expenses e JOIN users u ON u.id = e.user_id WHERE e.task_id = ? ORDER BY e.created_at'
   ).all(task.id);
@@ -238,6 +247,8 @@ app.get('/api/tasks/:id', auth, wrap((req, res) => {
     ...decorate(task, req.user),
     references: files.filter((f) => f.kind === 'reference'),
     submissions, expenses, comments, history,
+    // последние версии слотов — для сопоставления «новая версия креатива №…» при сдаче правок
+    slots: creatives.filter((c) => !creatives.some((x) => x.slot === c.slot && x.version > c.version)),
     durations: computeDurations(task, history),
   });
 }));
@@ -260,6 +271,8 @@ app.patch('/api/tasks/:id', auth, wrap((req, res) => {
 app.delete('/api/tasks/:id', auth, wrap((req, res) => {
   const task = getTask(req.params.id);
   ensureAction(task, req.user, 'delete');
+  const withMetrics = db.prepare('SELECT COUNT(*) c FROM creative_metrics m JOIN creatives c ON c.id = m.creative_id WHERE c.task_id = ?').get(task.id).c;
+  if (withMetrics) throw new HttpError(409, 'У креативов этой задачи есть результаты тестов — удаление уничтожит данные. Креативы можно отправить в архив.');
   const files = db.prepare('SELECT stored_name FROM files WHERE task_id = ?').all(task.id);
   db.transaction(() => {
     logHistory({ taskId: task.id, taskTitle: task.title, userId: req.user.id, action: 'deleted', from: task.status });
@@ -301,15 +314,25 @@ app.post('/api/tasks/:id/submit', auth, upload.array('files', 10), wrap((req, re
   const comment = String(req.body.comment || '').trim().slice(0, 5000);
   const links = String(req.body.links || '').trim().slice(0, 5000);
   if (!links && !req.files?.length) throw new HttpError(400, 'Прикрепите файлы или ссылку на результат');
+  const hoursRaw = String(req.body.hours_spent ?? '').replace(',', '.').trim();
+  const hours = Number(hoursRaw);
+  if (hoursRaw === '' || !Number.isFinite(hours) || hours < 0 || hours > 500) throw new HttpError(400, 'Укажите, сколько часов потрачено на этот раунд (число от 0)');
+  let targets;
+  if (req.body.slot_map) {
+    try { targets = JSON.parse(req.body.slot_map); } catch { throw new HttpError(400, 'Некорректное сопоставление креативов'); }
+    if (!Array.isArray(targets)) throw new HttpError(400, 'Некорректное сопоставление креативов');
+  }
   db.transaction(() => {
     const at = nowIso();
     const round = task.revision_count + 1;
-    const sid = db.prepare('INSERT INTO submissions (task_id, round, creative_id, comment, links, created_at) VALUES (?,?,?,?,?,?)')
-      .run(task.id, round, req.user.id, comment, links, at).lastInsertRowid;
-    saveFiles(req.files, task.id, req.user.id, 'result', sid);
+    const sid = db.prepare('INSERT INTO submissions (task_id, round, creative_id, comment, links, hours_spent, created_at) VALUES (?,?,?,?,?,?,?)')
+      .run(task.id, round, req.user.id, comment, links, Math.round(hours * 100) / 100, at).lastInsertRowid;
+    const fileIds = saveFiles(req.files, task.id, req.user.id, 'result', sid);
+    const files = fileIds.map((id) => db.prepare('SELECT id, original_name FROM files WHERE id = ?').get(id));
+    createCreativesForSubmission({ task, submissionId: sid, round, authorId: req.user.id, items: submissionItems(files, links), targets, at });
     const extra = { submitted_at: at, revision_started_at: null };
     if (!task.first_submitted_at) extra.first_submitted_at = at;
-    transition(task, req.user, 'review', extra, 'submitted', { round, files: req.files?.length || 0, links: links ? links.split(/\s+/).length : 0 });
+    transition(task, req.user, 'review', extra, 'submitted', { round, files: req.files?.length || 0, links: links ? links.split(/\s+/).length : 0, hours });
   })();
   res.json({ ok: true });
 }));
@@ -320,7 +343,9 @@ app.post('/api/tasks/:id/accept', auth, wrap((req, res) => {
     ensureAction(task, req.user, 'accept');
     const comment = String(req.body?.comment || '').trim();
     if (comment) db.prepare('INSERT INTO comments (task_id, user_id, text, created_at) VALUES (?,?,?,?)').run(task.id, req.user.id, comment, nowIso());
-    transition(task, req.user, 'done', { completed_at: nowIso() }, 'accepted');
+    const at = nowIso();
+    transition(task, req.user, 'done', { completed_at: at }, 'accepted');
+    acceptTaskCreatives(task, { at, userId: req.user.id });
   })();
   res.json({ ok: true });
 }));

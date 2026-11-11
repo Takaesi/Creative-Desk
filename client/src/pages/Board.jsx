@@ -6,7 +6,7 @@ import { useAuth } from '../auth.jsx';
 import { STATUS, STATUS_ORDER, PRIORITY, deadlineInfo, fmtNum, relTime } from '../utils.js';
 import { Avatar, PriorityBadge, useToast } from '../components/ui.jsx';
 import TaskModal from '../components/TaskModal.jsx';
-import TaskForm from '../components/TaskForm.jsx';
+import { useNewTask } from '../newTask.jsx';
 
 // Какое действие означает перетаскивание из колонки A в колонку B
 const DROP_ACTION = {
@@ -22,6 +22,7 @@ export default function Board() {
   const { user } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
+  const { openNew } = useNewTask();
   const { taskId } = useParams();
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -30,7 +31,6 @@ export default function Board() {
   const [filters, setFilters] = useState(() => {
     try { return JSON.parse(localStorage.getItem('board-filters')) || {}; } catch { return {}; }
   });
-  const [creating, setCreating] = useState(false);
   const [intent, setIntent] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const dragTask = useRef(null);
@@ -53,6 +53,7 @@ export default function Board() {
 
   useEffect(() => { const t = setTimeout(load, f.q ? 250 : 0); return () => clearTimeout(t); }, [load, f.q]);
   useEffect(() => { const t = setInterval(load, 20000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { window.addEventListener('tasks:changed', load); return () => window.removeEventListener('tasks:changed', load); }, [load]);
   useEffect(() => {
     api.get('/meta').then(setMeta).catch(() => {});
     api.get('/users').then(setUsers).catch(() => {});
@@ -111,7 +112,7 @@ export default function Board() {
         </div>
         <div className="head-actions">
           <button className="icon-btn" onClick={load} title="Обновить"><RefreshCw size={17} /></button>
-          {canCreate && <button className="btn btn-primary" onClick={() => setCreating(true)}><Plus size={16} /> Новая задача</button>}
+          {canCreate && <button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> Новая задача</button>}
         </div>
       </header>
 
@@ -179,9 +180,6 @@ export default function Board() {
         ))}
       </div>
 
-      {creating && (
-        <TaskForm onClose={() => setCreating(false)} onSaved={(t) => { setCreating(false); toast('Задача создана'); load(); open(t.id); }} />
-      )}
       {taskId && (
         <TaskModal
           key={taskId}

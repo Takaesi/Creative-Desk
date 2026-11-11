@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { db, UPLOAD_DIR, SETTINGS_SCHEMA } from './db.js';
 import { defaultUnits, scoreBrief } from './domain.js';
+import { createCreativesForSubmission, acceptTaskCreatives, latestSlots } from './creatives.js';
 
 const H = 3600_000;
 const DEMO_PASSWORD = 'demo123';
@@ -71,6 +72,28 @@ const REVISION_TEXTS = [
 const SUBMIT_TEXTS = ['Готово, 3 варианта хука внутри.', 'Залил в папку, есть исходники.', 'Сделал по ТЗ, плюс бонусный вариант с другим CTA.', 'Поправил всё по комментариям.', 'Финал, проверь пожалуйста ресайзы.', ''];
 const COMMENTS = ['Можно ли использовать лицо из референса?', 'Да, но обязательно с другим фоном.', 'Сколько хронометраж?', '15–20 секунд, не больше.', 'Добавь пожалуйста ещё вариант на испанском.', 'Ок, принято 👍'];
 
+const OFFER_COLORS = { KetoSlim: ['#22c55e', '#065f46'], JointFlex: ['#38bdf8', '#1e3a8a'], LuckySpin: ['#f59e0b', '#7c2d12'],
+  CreditFast: ['#a78bfa', '#312e81'], 'SmartWatch X': ['#f472b6', '#831843'], 'VPN Shield': ['#2dd4bf', '#134e4a'] };
+const esc = (t) => String(t).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
+/** Простое превью креатива: градиент оффера, код и подписи. Видео — с иконкой play и в 9:16. */
+function previewSvg({ code, offer, geo, type, variant, version }) {
+  const [c1, c2] = OFFER_COLORS[offer] || ['#6366f1', '#1e1b4b'];
+  const video = ['Видео', 'UGC', 'Анимация'].includes(type);
+  const w = 540; const h = video ? 960 : 540;
+  const angle = (variant * 47) % 360;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+<defs><linearGradient id="g" gradientTransform="rotate(${angle} .5 .5)"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient></defs>
+<rect width="${w}" height="${h}" fill="url(#g)"/>
+<circle cx="${w * 0.8}" cy="${h * 0.2}" r="${80 + (variant % 4) * 25}" fill="#fff" opacity=".12"/>
+<circle cx="${w * 0.15}" cy="${h * 0.85}" r="${60 + (variant % 3) * 30}" fill="#000" opacity=".12"/>
+${video ? `<circle cx="${w / 2}" cy="${h / 2}" r="64" fill="#000" opacity=".35"/><path d="M${w / 2 - 20} ${h / 2 - 34} L${w / 2 + 36} ${h / 2} L${w / 2 - 20} ${h / 2 + 34} Z" fill="#fff"/>` : ''}
+<text x="36" y="${h - 120}" font-family="Inter, Arial, sans-serif" font-size="64" font-weight="800" fill="#fff">${esc(code)}</text>
+<text x="36" y="${h - 72}" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="600" fill="#fff" opacity=".92">${esc(offer)} · ${esc(geo)}</text>
+<text x="36" y="${h - 36}" font-family="Inter, Arial, sans-serif" font-size="22" fill="#fff" opacity=".75">${esc(type)} · v${version}</text>
+</svg>`;
+}
+
 // детерминированный PRNG (mulberry32), чтобы демо выглядело одинаково после пересоздания
 function rng(seed) {
   return () => {
@@ -120,6 +143,31 @@ export function seed() {
     const insSub = db.prepare('INSERT INTO submissions (task_id, round, creative_id, comment, links, hours_spent, created_at) VALUES (?,?,?,?,?,?,?)');
     const insExp = db.prepare('INSERT INTO ai_expenses (task_id, user_id, service, credits, round, note, created_at) VALUES (?,?,?,?,?,?,?)');
     const insCom = db.prepare('INSERT INTO comments (task_id, user_id, text, kind, created_at) VALUES (?,?,?,?,?)');
+    const insFile = db.prepare(`INSERT INTO files (task_id, submission_id, kind, original_name, stored_name, mime, size, uploaded_by, created_at)
+      VALUES (?,?,'result',?,?,'image/svg+xml',0,?,?)`);
+    let variantSeq = 0;
+    /** Сдача с файлами-превью: креативы создаются той же функцией, что и в API. */
+    const seedSubmit = (task, round, creativeId, comment, hours, at) => {
+      const sid = insSub.run(task.id, round, creativeId, comment, '', hours, at).lastInsertRowid;
+      const prev = latestSlots(task.id);
+      // первая сдача — по штуке на единицу (до 5), правки — новые версии 1–2 слотов
+      const n = round === 1 ? Math.min(task.quantity, 5) : Math.min(prev.length, 1 + Math.floor(rand() * 2));
+      const targets = round === 1 ? undefined : prev.slice(0, n).map((c) => c.slot);
+      const items = [];
+      for (let k = 0; k < n; k++) {
+        const stored = `seed-${task.id}-r${round}-${k + 1}.svg`;
+        const name = `${task.creative_type.toLowerCase()}_${task.offer.replace(/\s+/g, '')}_${k + 1}${round > 1 ? `_v${round}` : ''}.svg`;
+        const fid = insFile.run(task.id, sid, name, stored, creativeId, at).lastInsertRowid;
+        items.push({ file_id: fid, link: null, title: name, stored });
+      }
+      const ids = createCreativesForSubmission({ task, submissionId: sid, round, authorId: creativeId, items, targets, at, log: false });
+      ids.forEach((cid, k) => {
+        const svg = previewSvg({ code: `CD-${cid}`, offer: task.offer, geo: task.geo.split(',')[0], type: task.creative_type, variant: variantSeq++, version: round });
+        fs.writeFileSync(path.join(UPLOAD_DIR, items[k].stored), svg);
+        db.prepare('UPDATE files SET size = ? WHERE id = ?').run(Buffer.byteLength(svg), items[k].file_id);
+      });
+      return ids;
+    };
 
     const N = 46;
     for (let i = 0; i < N; i++) {
@@ -196,7 +244,7 @@ export function seed() {
           if (!step(between(2, revisions ? 10 : 30) * H * speed)) break;
           addExpenses();
           const hours = Math.round(between(1, revisions ? 4 : 8) * 2) / 2;
-          insSub.run(taskId, revisions + 1, creative, pick(SUBMIT_TEXTS), `https://drive.google.com/drive/folders/result-${taskId}-r${revisions + 1}`, hours, iso(t));
+          seedSubmit(db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId), revisions + 1, creative, pick(SUBMIT_TEXTS), hours, iso(t));
           state.submitted_at = t;
           state.first_submitted_at ??= t;
           state.revision_started_at = null;
@@ -215,6 +263,7 @@ export function seed() {
           } else {
             state.completed_at = t;
             move('done', 'accepted', reviewer);
+            acceptTaskCreatives({ id: taskId, title }, { at: iso(t), log: false });
             finished = true;
           }
         }
@@ -230,7 +279,8 @@ export function seed() {
         const shiftSec = Math.round((lastAt - (now - between(0.2, target === 'done' ? 30 : 9) * H)) / 1000);
         const sh = (col) => `${col} = shift_iso(${col}, ${shiftSec * 1000})`;
         db.prepare(`UPDATE tasks SET ${sh('created_at')}, ${sh('deadline')} WHERE id = ?`).run(taskId);
-        for (const tbl of ['history', 'submissions', 'ai_expenses', 'comments']) db.prepare(`UPDATE ${tbl} SET ${sh('created_at')} WHERE task_id = ?`).run(taskId);
+        for (const tbl of ['history', 'submissions', 'ai_expenses', 'comments', 'files']) db.prepare(`UPDATE ${tbl} SET ${sh('created_at')} WHERE task_id = ?`).run(taskId);
+        db.prepare(`UPDATE creatives SET ${sh('created_at')}, ${sh('accepted_at')}, ${sh('updated_at')} WHERE task_id = ?`).run(taskId);
         for (const k of ['taken_at', 'first_submitted_at', 'submitted_at', 'revision_started_at', 'completed_at']) if (state[k]) state[k] -= shiftSec * 1000;
         t -= shiftSec * 1000;
       }

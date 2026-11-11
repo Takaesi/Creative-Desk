@@ -119,3 +119,20 @@ export function toLocalInput(iso) {
 
 export const splitLinks = (text = '') => text.split(/\s+/).map((s) => s.trim()).filter(Boolean);
 export const isUrl = (s) => /^https?:\/\//i.test(s);
+
+// ---------- креативы ----------
+export const CREATIVE_STATUS = {
+  draft: { label: 'Черновик', color: '#8a93a6' },
+  superseded: { label: 'Старая версия', color: '#a3a9b6' },
+  accepted: { label: 'Принят', color: '#2a78d6' },
+  in_test: { label: 'В тесте', color: '#7c5cf0' },
+  winner: { label: 'Победитель', color: '#16a34a' },
+  average: { label: 'Средний', color: '#d4a106' },
+  loser: { label: 'Не зашёл', color: '#dc2626' },
+  burned: { label: 'Выгорел', color: '#ea6a12' },
+  archived: { label: 'В архиве', color: '#6b7280' },
+};
+export const LIBRARY_STATUSES = ['accepted', 'in_test', 'winner', 'average', 'loser', 'burned', 'draft', 'superseded', 'archived'];
+export const VERDICT_LABEL = { winner: 'Победитель', average: 'Средний', loser: 'Не зашёл' };
+export const isoDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+export const fmtDayFull = (day) => (day ? new Date(`${day}T00:00:00`).toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' }).replace('.', '') : '—');

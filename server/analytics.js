@@ -155,3 +155,41 @@ export function buildAnalytics({ from, to }) {
     overdueList,
   };
 }
+
+/**
+ * Себестоимость задачи: труд (часы × ставка исполнителя) + AI (кредиты × цена сервиса).
+ * Основная работа — первая сдача / AI-расходы раунда 0; правки — всё последующее.
+ */
+export function computeTaskCost(taskId) {
+  const task = db.prepare('SELECT id, quantity FROM tasks WHERE id = ?').get(taskId);
+  if (!task) return null;
+  const subs = db.prepare(
+    `SELECT s.round, s.hours_spent, u.hourly_rate_rub AS rate, u.name FROM submissions s JOIN users u ON u.id = s.creative_id WHERE s.task_id = ?`
+  ).all(taskId);
+  const ai = db.prepare(
+    `SELECT e.round, e.credits, COALESCE(a.credit_price_rub, 0) AS price FROM ai_expenses e LEFT JOIN ai_services a ON a.name = e.service WHERE e.task_id = ?`
+  ).all(taskId);
+  const hours = subs.reduce((s, x) => s + x.hours_spent, 0);
+  const laborBase = subs.filter((x) => x.round <= 1).reduce((s, x) => s + x.hours_spent * x.rate, 0);
+  const laborRev = subs.filter((x) => x.round > 1).reduce((s, x) => s + x.hours_spent * x.rate, 0);
+  const aiBase = ai.filter((x) => x.round === 0).reduce((s, x) => s + x.credits * x.price, 0);
+  const aiRev = ai.filter((x) => x.round > 0).reduce((s, x) => s + x.credits * x.price, 0);
+  const accepted = db.prepare("SELECT COUNT(*) c FROM creatives WHERE task_id = ? AND status NOT IN ('draft','superseded')").get(taskId).c;
+  const labor = laborBase + laborRev;
+  const aiTotal = aiBase + aiRev;
+  const total = labor + aiTotal;
+  const rates = [...new Set(subs.map((s) => s.rate))];
+  const r2 = (x) => Math.round(x * 100) / 100;
+  return {
+    hours: r2(hours),
+    rate: rates.length === 1 ? rates[0] : null,
+    labor: r2(labor),
+    ai: r2(aiTotal),
+    total: r2(total),
+    base: r2(laborBase + aiBase),
+    revisions: r2(laborRev + aiRev),
+    creatives: accepted || task.quantity,
+    per_creative: r2(total / (accepted || task.quantity)),
+    rate_missing: subs.some((s) => s.hours_spent > 0 && !s.rate),
+  };
+}

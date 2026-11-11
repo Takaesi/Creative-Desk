@@ -5,6 +5,34 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 
+import Database from 'better-sqlite3';
+import bcrypt from 'bcryptjs';
+
+// Схема БД версии 1 (до v2) — для проверки миграции
+const OLD_SCHEMA = `
+CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('buyer','creative','lead')), position TEXT, color TEXT NOT NULL DEFAULT '#6366f1',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, offer TEXT NOT NULL, geo TEXT NOT NULL, creative_type TEXT NOT NULL,
+  quantity INTEGER NOT NULL DEFAULT 1, description TEXT NOT NULL DEFAULT '', references_text TEXT NOT NULL DEFAULT '',
+  priority TEXT NOT NULL DEFAULT 'medium', deadline TEXT, status TEXT NOT NULL DEFAULT 'new', buyer_id INTEGER NOT NULL REFERENCES users(id),
+  creative_id INTEGER REFERENCES users(id), revision_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, taken_at TEXT,
+  submitted_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, round INTEGER NOT NULL,
+  creative_id INTEGER NOT NULL REFERENCES users(id), comment TEXT NOT NULL DEFAULT '', links TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  submission_id INTEGER REFERENCES submissions(id) ON DELETE CASCADE, kind TEXT NOT NULL, original_name TEXT NOT NULL, stored_name TEXT NOT NULL,
+  mime TEXT, size INTEGER NOT NULL DEFAULT 0, uploaded_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);
+CREATE TABLE ai_expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id), service TEXT NOT NULL, credits REAL NOT NULL, round INTEGER NOT NULL DEFAULT 0,
+  note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE comments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id), text TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'comment', created_at TEXT NOT NULL);
+CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL, task_title TEXT,
+  user_id INTEGER REFERENCES users(id), action TEXT NOT NULL, from_status TEXT, to_status TEXT, details TEXT, created_at TEXT NOT NULL);
+`;
+
 const PORT = 3999;
 const BASE = `http://localhost:${PORT}/api`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdesk-'));
@@ -144,7 +172,9 @@ try {
     assert.equal((await cr.post(`/tasks/${id}/submit`, new FormData())).status, 400);
   });
   await step('сдача работы → На проверке', async () => {
-    const fd = new FormData(); fd.append('links', 'https://drive.google.com/x'); fd.append('comment', 'v1');
+    const noHours = new FormData(); noHours.append('links', 'https://drive.google.com/x');
+    assert.equal((await cr.post(`/tasks/${id}/submit`, noHours)).status, 400, 'часы обязательны');
+    const fd = new FormData(); fd.append('links', 'https://drive.google.com/x'); fd.append('comment', 'v1'); fd.append('hours_spent', '3');
     assert.equal((await cr.post(`/tasks/${id}/submit`, fd)).status, 200);
     assert.equal((await cr.get(`/tasks/${id}`)).body.status, 'review');
   });
@@ -169,7 +199,7 @@ try {
   });
   await step('расходы на правках пишутся в раунд 1, повторная сдача', async () => {
     await cr.post(`/tasks/${id}/expenses`, { service: 'Runway', credits: 40 });
-    const fd = new FormData(); fd.append('links', 'https://drive.google.com/y');
+    const fd = new FormData(); fd.append('links', 'https://drive.google.com/y'); fd.append('hours_spent', '1.5');
     fd.append('files', new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }), 'result.png');
     assert.equal((await cr.post(`/tasks/${id}/submit`, fd)).status, 200);
     const t = (await cr.get(`/tasks/${id}`)).body;
@@ -227,6 +257,115 @@ try {
     const res = await fetch(`${BASE}/files/${t.references[0].id}`, { headers: { Authorization: 'Bearer x' } });
     assert.equal(res.status, 401);
   });
+
+  // ---------- F2: креативы и библиотека ----------
+  const offerId = (await buyer.get('/dictionaries')).body.offers.find((o) => o.is_active).id;
+  const newTask = async (extra = {}) => {
+    const r = await buyer.post('/tasks', { offer_id: offerId, geo: 'BR', creative_type: 'Баннер', quantity: 2, deadline: new Date(Date.now() + 3 * 86400000).toISOString(), ...extra });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    return r.body.id;
+  };
+  const png = () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
+  const submit = async (who, taskId, { files = [], links = '', hours = '2', slotMap } = {}) => {
+    const fd = new FormData();
+    files.forEach((n) => fd.append('files', png(), n));
+    if (links) fd.append('links', links);
+    fd.append('hours_spent', hours);
+    if (slotMap) fd.append('slot_map', JSON.stringify(slotMap));
+    return who.post(`/tasks/${taskId}/submit`, fd);
+  };
+  const crsOf = async (taskId) => (await lead.get(`/creatives?task_id=${taskId}&all=1&limit=200`)).body.items.sort((a, b) => a.slot - b.slot || a.version - b.version);
+
+  await step('F2: сдача 3 файлов и 2 ссылок создаёт 5 креативов-черновиков со слотами 1–5', async () => {
+    const tid = await newTask();
+    await cr2.post(`/tasks/${tid}/take`);
+    assert.equal((await submit(cr2, tid, { files: ['a.png', 'b.png', 'c.png'], links: 'https://drive.google.com/1\nhttps://figma.com/2' })).status, 200);
+    const list = await crsOf(tid);
+    assert.equal(list.length, 5);
+    assert.deepEqual(list.map((c) => c.slot), [1, 2, 3, 4, 5]);
+    assert.ok(list.every((c) => c.status === 'draft' && c.version === 1));
+    assert.equal(list[3].preview_kind, 'link');
+  });
+
+  let flowTask;
+  await step('F2: правки → новая версия слота 1 перекрывает v1; приёмка — последние версии accepted', async () => {
+    flowTask = await newTask();
+    await cr2.post(`/tasks/${flowTask}/take`);
+    await submit(cr2, flowTask, { files: ['one.png', 'two.png'] });
+    await buyer.post(`/tasks/${flowTask}/revision`, { comment: 'поправь первый' });
+    await cr2.post(`/tasks/${flowTask}/take`);
+    assert.equal((await submit(cr2, flowTask, { files: ['one-v2.png'], slotMap: [9] })).status, 400, 'несуществующий слот');
+    assert.equal((await submit(cr2, flowTask, { files: ['one-v2.png'], slotMap: [1], hours: '1' })).status, 200);
+    let list = await crsOf(flowTask);
+    const s1 = list.filter((c) => c.slot === 1);
+    assert.deepEqual(s1.map((c) => [c.version, c.status]), [[1, 'superseded'], [2, 'draft']]);
+    assert.equal((await buyer.post(`/tasks/${flowTask}/accept`)).status, 200);
+    list = await crsOf(flowTask);
+    assert.deepEqual(list.map((c) => [c.slot, c.version, c.status]), [[1, 1, 'superseded'], [1, 2, 'accepted'], [2, 1, 'accepted']]);
+  });
+  await step('F2: права на статус креатива — креативщик и чужой байер получают 403', async () => {
+    const c = (await crsOf(flowTask)).find((x) => x.status === 'accepted');
+    assert.equal((await cr2.post(`/creatives/${c.id}/status`, { to: 'in_test' })).status, 403);
+    assert.equal((await buyer2.post(`/creatives/${c.id}/status`, { to: 'in_test' })).status, 403);
+    assert.equal((await buyer.post(`/creatives/${c.id}/status`, { to: 'winner' })).status, 409, 'вердикт до запуска');
+    assert.equal((await buyer.post(`/creatives/${c.id}/status`, { to: 'archived' })).status, 200);
+    const r = await buyer.post(`/creatives/${c.id}/status`, { to: 'restore' });
+    assert.equal(r.body.status, 'accepted', 'возврат из архива в прежний статус');
+  });
+  await step('F2: страница креатива — версии, действия, история; фильтры библиотеки', async () => {
+    const c = (await crsOf(flowTask)).find((x) => x.slot === 1 && x.version === 2);
+    const d = (await buyer.get(`/creatives/${c.id}`)).body;
+    assert.equal(d.versions.length, 2);
+    assert.ok(d.actions.includes('in_test'));
+    assert.ok(d.cost && d.cost.hours === 3, 'себестоимость видна байеру-владельцу');
+    assert.equal((await cr2.get(`/creatives/${c.id}`)).body.cost, undefined, 'креативщику денежные поля не отдаются');
+    assert.equal((await buyer.patch(`/creatives/${c.id}`, { title: 'Главный баннер', tags: 'Яркий, ugc' })).status, 200);
+    const found = (await buyer.get(`/creatives?q=CD-${c.id}`)).body;
+    assert.equal(found.items[0].title, 'Главный баннер');
+    assert.deepEqual(found.items[0].tags, ['яркий', 'ugc']);
+    const byTag = (await buyer.get('/creatives?q=яркий')).body;
+    assert.ok(byTag.items.some((x) => x.id === c.id));
+    const hidden = (await buyer.get(`/creatives?task_id=${flowTask}`)).body;
+    assert.ok(hidden.items.every((x) => !['draft', 'superseded', 'archived'].includes(x.status)), 'по умолчанию скрыты черновики');
+  });
+  await step('F2: модалка задачи — у сдач есть коды креативов', async () => {
+    const t = (await buyer.get(`/tasks/${flowTask}`)).body;
+    assert.ok(t.submissions[0].creatives.length === 2 && t.submissions[0].creatives[0].code.startsWith('CD-'));
+  });
+
+  await step('Миграция: база старой схемы обновляется без потерь и получает креативы', async () => {
+    const oldDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdesk-old-'));
+    try {
+      const odb = new Database(path.join(oldDir, 'app.db'));
+      odb.exec(OLD_SCHEMA);
+      const h = bcrypt.hashSync('demo123', 4);
+      odb.prepare("INSERT INTO users (name, email, password_hash, role) VALUES ('Lead','old-lead@x.ru',?,'lead'),('Buyer','old-buyer@x.ru',?,'buyer'),('Cr','old-cr@x.ru',?,'creative')").run(h, h, h);
+      const at = new Date(Date.now() - 86400000).toISOString();
+      odb.prepare(`INSERT INTO tasks (title, offer, geo, creative_type, quantity, status, buyer_id, creative_id, revision_count, created_at, completed_at, updated_at)
+        VALUES ('Old task','Old Offer','BR','Видео',2,'done',2,3,1,?,?,?)`).run(at, at, at);
+      odb.prepare("INSERT INTO submissions (task_id, round, creative_id, links, created_at) VALUES (1,1,3,'https://a.com/1 https://a.com/2',?),(1,2,3,'https://a.com/1v2',?)").run(at, at);
+      odb.prepare("INSERT INTO ai_expenses (task_id, user_id, service, credits, created_at) VALUES (1,3,'Midjourney',10,?)").run(at);
+      odb.close();
+      const port = PORT + 1;
+      const old = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, PORT: port, DATA_DIR: oldDir }, stdio: ['ignore', 'pipe', 'inherit'] });
+      try {
+        let up = false;
+        for (let i = 0; i < 50 && !up; i++) {
+          try { up = (await fetch(`http://localhost:${port}/api/health`)).ok; } catch { await new Promise((r) => setTimeout(r, 100)); }
+        }
+        const login = await (await fetch(`http://localhost:${port}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'old-lead@x.ru', password: 'demo123' }) })).json();
+        const get = async (u) => (await fetch(`http://localhost:${port}/api${u}`, { headers: { Authorization: `Bearer ${login.token}` } })).json();
+        const task = await get('/tasks/1');
+        assert.ok(task.offer_id, 'offer_id проставлен');
+        const d = await get('/dictionaries');
+        assert.ok(d.offers.some((o) => o.name === 'Old Offer'));
+        assert.ok(d.aiServices.some((x) => x.name === 'Midjourney'));
+        const list = (await get('/creatives?task_id=1&all=1')).items.sort((a, b) => a.slot - b.slot || a.version - b.version);
+        assert.deepEqual(list.map((c) => [c.slot, c.version, c.status]), [[1, 1, 'superseded'], [1, 2, 'accepted'], [2, 1, 'accepted']]);
+      } finally { old.kill(); }
+    } finally { fs.rmSync(oldDir, { recursive: true, force: true }); }
+  });
+
   console.log(`\n${passed} проверок пройдено`);
 } catch (e) {
   console.error('\n✗ FAILED:', e.message);
@@ -235,3 +374,4 @@ try {
   srv.kill();
   fs.rmSync(dataDir, { recursive: true, force: true });
 }
+

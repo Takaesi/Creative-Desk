@@ -1,5 +1,8 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
-import { KanbanSquare, BarChart3, History, LogOut, Sparkles, Settings as SettingsIcon } from 'lucide-react';
+import { KanbanSquare, BarChart3, History, LogOut, Sparkles, Settings as SettingsIcon, Images, Plus, ListTodo } from 'lucide-react';
+import { NewTaskProvider, useNewTask } from './newTask.jsx';
+import Library from './pages/Library.jsx';
+import CreativePage from './pages/CreativePage.jsx';
 import { DictProvider } from './dicts.jsx';
 import Settings from './pages/Settings.jsx';
 import { useAuth } from './auth.jsx';
@@ -19,6 +22,7 @@ export default function App() {
   return (
     <DictProvider>
     <ToastProvider>
+    <NewTaskProvider>
       <div className="layout">
         <aside className="sidebar">
           <div className="brand">
@@ -28,8 +32,10 @@ export default function App() {
               <small>креативный отдел</small>
             </div>
           </div>
+          {user.role !== 'creative' && <NewTaskButton />}
           <nav>
             <NavLink to="/board"><KanbanSquare size={18} /><span>Доска задач</span></NavLink>
+            <NavLink to="/library"><Images size={18} /><span>Библиотека</span></NavLink>
             {isLead && <NavLink to="/analytics"><BarChart3 size={18} /><span>Аналитика</span></NavLink>}
             <NavLink to="/activity"><History size={18} /><span>История действий</span></NavLink>
             {user.role !== 'creative' && <NavLink to="/settings"><SettingsIcon size={18} /><span>Настройки</span></NavLink>}
@@ -47,6 +53,8 @@ export default function App() {
           <Routes>
             <Route path="/board" element={<Board />} />
             <Route path="/board/:taskId" element={<Board />} />
+            <Route path="/library" element={<Library />} />
+            <Route path="/library/:creativeId" element={<CreativePage />} />
             {isLead && <Route path="/analytics" element={<Analytics />} />}
             <Route path="/activity" element={<Activity />} />
             {user.role !== 'creative' && <Route path="/settings" element={<Settings />} />}
@@ -54,7 +62,13 @@ export default function App() {
           </Routes>
         </main>
       </div>
+    </NewTaskProvider>
     </ToastProvider>
     </DictProvider>
   );
+}
+
+function NewTaskButton() {
+  const { openNew } = useNewTask();
+  return <button className="btn btn-primary new-task-btn" onClick={() => openNew()} title="Новое ТЗ (N)"><Plus size={16} /><span>Новое ТЗ</span></button>;
 }
