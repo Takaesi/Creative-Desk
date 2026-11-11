@@ -5,6 +5,7 @@ import { api } from '../api.js';
 import { useDicts } from '../dicts.jsx';
 import { PRIORITY, toLocalInput, fmtSize } from '../utils.js';
 import { Field, Modal } from './ui.jsx';
+import { ParentCreative } from './creative.jsx';
 
 const QUICK_DEADLINES = [
   { label: '+4 ч', h: 4 }, { label: '+1 день', h: 24 }, { label: '+2 дня', h: 48 }, { label: '+3 дня', h: 72 }, { label: '+неделя', h: 168 },
@@ -28,7 +29,7 @@ function fromTask(t) {
  * Форма ТЗ: создание (байер/руководитель) и редактирование.
  * initial — предзаполнение новой задачи (вариации, дублирование, шаблон).
  */
-export default function TaskForm({ task, initial, onClose, onSaved, title: customTitle }) {
+export default function TaskForm({ task, initial, parent, onClose, onSaved, title: customTitle }) {
   const { dicts } = useDicts();
   const editing = !!task;
   const [v, setV] = useState(() => {
@@ -60,6 +61,7 @@ export default function TaskForm({ task, initial, onClose, onSaved, title: custo
     offer: offers.find((o) => o.id === v.offer_id)?.name || v.offer,
     deadline: v.deadline ? new Date(v.deadline).toISOString() : '',
     estimate_units: unitsTouched && v.estimate_units ? v.estimate_units : autoUnits,
+    ...(parent ? { parent_creative_id: parent.id } : {}),
   });
 
   const submit = async (e) => {
@@ -100,6 +102,7 @@ export default function TaskForm({ task, initial, onClose, onSaved, title: custo
       }
     >
       <form id="task-form" className="form-grid" onSubmit={submit}>
+        {parent && <ParentCreative c={parent} className="span-2" />}
         <Field label="Оффер" required hint={v.offer && !v.offer_id ? 'Нет в справочнике — выберите из списка' : undefined}>
           <input className={`input ${v.offer && !v.offer_id ? 'input-bad' : ''}`} list="offers" value={v.offer} onChange={setOffer} placeholder="Начните вводить название" autoFocus={!editing} />
           <datalist id="offers">{offers.map((o) => <option key={o.id} value={o.name}>{o.vertical}</option>)}</datalist>

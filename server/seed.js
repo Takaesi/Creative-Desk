@@ -4,9 +4,10 @@ import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, UPLOAD_DIR, SETTINGS_SCHEMA } from './db.js';
+import { db, UPLOAD_DIR, SETTINGS_SCHEMA, getSettings } from './db.js';
 import { defaultUnits, scoreBrief } from './domain.js';
-import { createCreativesForSubmission, acceptTaskCreatives, latestSlots } from './creatives.js';
+import { createCreativesForSubmission, acceptTaskCreatives, latestSlots, refreshCreativeAfterMetrics, setCreativeStatus } from './creatives.js';
+import { computeMetrics } from './metrics.js';
 
 const H = 3600_000;
 const DEMO_PASSWORD = 'demo123';
@@ -296,7 +297,122 @@ export function seed() {
         state.completed_at && iso(state.completed_at), revisions, iso(Math.min(t, now)), taskId
       );
     }
+
+    seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit, lead });
   })();
+}
+
+const DAY = 24 * H;
+const dayStr = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/**
+ * Результаты тестов: метрики ~60 % принятых креативов, вердикты (у части — только предложение),
+ * два выгорающих победителя и одно «семейство» с вариациями.
+ */
+function seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit }) {
+  const settings = getSettings();
+  const upsert = db.prepare(`INSERT INTO creative_metrics (creative_id, date, impressions, clicks, conversions, spend, revenue, source, created_by, created_at, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (creative_id, date) DO UPDATE SET impressions = excluded.impressions, clicks = excluded.clicks,
+    conversions = excluded.conversions, spend = excluded.spend, revenue = excluded.revenue`);
+  const get = (id) => db.prepare('SELECT * FROM creatives WHERE id = ?').get(id);
+
+  /** Дневная статистика с целевым ROI и формой CTR (shape(i) — множитель CTR в i-й день). */
+  const genDays = (c, startMs, n, roi, shape = () => 1) => {
+    const baseImp = between(4000, 16000);
+    const baseCtr = between(0.9, 3.2) / 100;
+    const payout = between(500, 1400);
+    let last = startMs;
+    for (let i = 0; i < n; i++) {
+      const dms = startMs + i * DAY;
+      if (dms > now - DAY / 2) break;
+      const impressions = Math.round(baseImp * between(0.75, 1.25));
+      const clicks = Math.max(1, Math.round(impressions * baseCtr * shape(i) * between(0.9, 1.1)));
+      const spend = Math.round(between(300, 2200) * 100) / 100;
+      const revenue = Math.max(0, Math.round(spend * (1 + (roi + between(-12, 12)) / 100) * 100) / 100);
+      const conversions = Math.min(clicks, Math.round(revenue / payout));
+      upsert.run(c.id, dayStr(dms), impressions, clicks, conversions, spend, revenue, rand() < 0.5 ? 'csv' : 'manual', c.buyer_id, iso(dms + 10 * H), iso(dms + 10 * H));
+      last = dms;
+    }
+    return last;
+  };
+  const after = (c, lastMs) => {
+    const at = iso(Math.min(now - H, lastMs + 11 * H));
+    refreshCreativeAfterMetrics(c.id, { userId: c.buyer_id, at, settings });
+    return at;
+  };
+
+  const accepted = db.prepare("SELECT * FROM creatives WHERE status = 'accepted' AND accepted_at < ? ORDER BY id").all(iso(now - 2 * DAY));
+  let pendingLeft = 4; // креативы, у которых только предложение вердикта — для блока «Ждут вердикта»
+  const tested = [];
+  for (const c of accepted) {
+    if (rand() > 0.62) continue;
+    const r = rand();
+    const roi = r < 0.15 ? between(35, 120) : r < 0.6 ? between(3, 26) : between(-75, -8);
+    const daysAvail = Math.floor((now - Date.parse(c.accepted_at)) / DAY) - 1;
+    const n = Math.min(Math.round(between(7, 21)), daysAvail);
+    if (n < 3) continue;
+    const start = Date.parse(c.accepted_at) + DAY;
+    const last = genDays(c, start, n, roi);
+    const at = after(c, last);
+    const fresh = get(c.id);
+    if (!fresh.suggested_verdict) continue;
+    tested.push(fresh.id);
+    if (pendingLeft > 0 && rand() < 0.25) { pendingLeft--; continue; }
+    // обычно соглашаются с системой, иногда — нет (на карточке появится «по данным — …»)
+    let verdict = fresh.suggested_verdict;
+    if (rand() < 0.08) verdict = verdict === 'average' ? 'winner' : 'average';
+    setCreativeStatus(fresh, verdict, { userId: c.buyer_id, at, extra: { suggested: fresh.suggested_verdict } });
+  }
+
+  // два выгорающих победителя: CTR явно падает к последним дням
+  const longOnes = db.prepare(`SELECT c.* FROM creatives c WHERE c.id IN (${tested.join(',') || 0})
+    AND (SELECT COUNT(*) FROM creative_metrics m WHERE m.creative_id = c.id) >= 9 ORDER BY c.id DESC LIMIT 2`).all();
+  for (const c of longOnes) {
+    const rows = db.prepare('SELECT * FROM creative_metrics WHERE creative_id = ? ORDER BY date').all(c.id);
+    const n = rows.length;
+    rows.forEach((row, i) => {
+      const k = 1 - 0.55 * (i / (n - 1)) ** 1.6;
+      const clicks = Math.max(1, Math.round(row.impressions * 0.031 * k));
+      const revenue = Math.round(row.spend * between(1.5, 1.9) * 100) / 100;
+      db.prepare('UPDATE creative_metrics SET clicks = ?, conversions = MIN(conversions, ?), revenue = ? WHERE id = ?').run(clicks, clicks, revenue, row.id);
+    });
+    const lastMs = Date.parse(rows[n - 1].date);
+    let fresh = get(c.id);
+    if (fresh.status !== 'winner') setCreativeStatus(fresh, 'winner', { userId: c.buyer_id, at: iso(Date.parse(rows[3].date) + 12 * H) });
+    after(get(c.id), lastMs);
+  }
+
+  // «семейство»: победитель → задача-вариация (итерация 2) с 3 креативами, один превзошёл родителя
+  const parent = db.prepare(`SELECT c.* FROM creatives c WHERE c.status = 'winner' AND c.burnout_detected_at IS NULL
+    AND c.accepted_at < ? ORDER BY c.id LIMIT 1`).get(iso(now - 14 * DAY));
+  if (!parent) return;
+  const pTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(parent.task_id);
+  const pRoi = computeMetrics(db.prepare('SELECT * FROM creative_metrics WHERE creative_id = ?').all(parent.id)).roi;
+  const created = now - 11 * DAY;
+  const title = `Вариации CD-${parent.id}: ${parent.title}`;
+  const desc = `Сделать вариации креатива-победителя CD-${parent.id}.\nРезультат оригинала: ROI ${Math.round(pRoi)} %.\nСохранить: подход и хук.\nИзменить: первые 3 секунды и персонажа.`;
+  const vid = insTask.run(title, pTask.offer, pTask.offer_id, pTask.approach_id, pTask.geo, pTask.creative_type, 3, desc, '', pTask.language, pTask.format, pTask.hook,
+    defaultUnits(pTask.creative_type, 3), 'high', iso(created + 48 * H), pTask.buyer_id, iso(created), iso(created)).lastInsertRowid;
+  const author = parent.author_id;
+  const taken = created + 2 * H; const submitted = created + 20 * H; const done = created + 26 * H;
+  db.prepare(`UPDATE tasks SET parent_creative_id = ?, iteration = 2, status = 'done', creative_id = ?, taken_at = ?, first_submitted_at = ?, submitted_at = ?,
+    completed_at = ?, updated_at = ? WHERE id = ?`).run(parent.id, author, iso(taken), iso(submitted), iso(submitted), iso(done), iso(done), vid);
+  const vTask = db.prepare('SELECT * FROM tasks WHERE id = ?').get(vid);
+  db.prepare('UPDATE tasks SET brief_score = ? WHERE id = ?').run(scoreBrief({ ...vTask, references_text: '' }).score, vid);
+  insHist.run(vid, title, pTask.buyer_id, 'created', null, 'new', JSON.stringify({ priority: 'high', parent: `CD-${parent.id}`, iteration: 2 }), iso(created));
+  insHist.run(vid, title, author, 'taken', 'new', 'in_progress', null, iso(taken));
+  seedSubmit(vTask, 1, author, 'Три вариации: новый хук, другой персонаж, другой фон.', 5, iso(submitted));
+  insHist.run(vid, title, author, 'submitted', 'in_progress', 'review', JSON.stringify({ round: 1, files: 3, links: 0, hours: 5 }), iso(submitted));
+  insHist.run(vid, title, pTask.buyer_id, 'accepted', 'review', 'done', null, iso(done));
+  acceptTaskCreatives(vTask, { at: iso(done), log: false });
+  const kids = db.prepare('SELECT * FROM creatives WHERE task_id = ? ORDER BY slot').all(vid);
+  const rois = [Math.max(pRoi + 25, 60), between(5, 20), between(-50, -15)];
+  kids.forEach((k, i) => {
+    const last = genDays(k, done + DAY, 8, rois[i] ?? 10);
+    const at = after(k, last);
+    const fresh = get(k.id);
+    if (fresh.suggested_verdict) setCreativeStatus(fresh, fresh.suggested_verdict, { userId: k.buyer_id, at });
+  });
 }
 
 export function seedIfEmpty() {

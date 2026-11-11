@@ -6,10 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, nowIso, logHistory, UPLOAD_DIR, runDbMigrations } from './db.js';
-import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions, defaultUnits } from './domain.js';
+import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions, defaultUnits, allowedCreativeActions } from './domain.js';
 import { HttpError, wrap, auth, requireRole, upload, fixName, publicUser, idOrNull } from './http.js';
 import dictionariesRouter, { findOffer, findApproach } from './routes/dictionaries.js';
-import creativesRouter from './routes/creatives.js';
+import creativesRouter, { getCreativeRow, shapeCreative } from './routes/creatives.js';
 import { submissionItems, createCreativesForSubmission, acceptTaskCreatives, migrateLegacyCreatives, code } from './creatives.js';
 import { buildAnalytics } from './analytics.js';
 import { seed, seedIfEmpty } from './seed.js';
@@ -203,20 +203,32 @@ app.get('/api/tasks', auth, wrap((req, res) => {
 
 app.post('/api/tasks', auth, requireRole('buyer', 'lead'), upload.array('files', 10), wrap((req, res) => {
   const f = taskFields(req.body);
+  // F4: задача-вариация от креатива — iteration и байер берутся от исходника
+  let parent = null;
+  const parentId = idOrNull(req.body.parent_creative_id);
+  if (parentId != null) {
+    parent = getCreativeRow(parentId);
+    const acts = allowedCreativeActions(parent, req.user);
+    if (!acts.includes('edit')) throw new HttpError(403, 'Заказывать вариации может байер-владелец креатива или руководитель');
+    if (!acts.includes('variations')) throw new HttpError(409, 'Вариации заказывают для победителей, средних и выгоревших креативов');
+    f.parent_creative_id = parent.id;
+    f.iteration = (parent.task_iteration || 1) + 1;
+  }
   const at = nowIso();
   const id = db.transaction(() => {
     const r = db.prepare(
       `INSERT INTO tasks (title, offer, offer_id, approach_id, geo, creative_type, quantity, description, references_text, language, format, hook,
-         estimate_units, priority, deadline, buyer_id, created_at, updated_at)
+         estimate_units, priority, deadline, buyer_id, parent_creative_id, iteration, created_at, updated_at)
        VALUES (@title, @offer, @offer_id, @approach_id, @geo, @creative_type, @quantity, @description, @references_text, @language, @format, @hook,
-         @estimate_units, @priority, @deadline, @buyer_id, @at, @at)`
+         @estimate_units, @priority, @deadline, @buyer_id, @parent_creative_id, @iteration, @at, @at)`
     ).run({
       quantity: 1, description: '', references_text: '', priority: 'medium', language: '', format: '', hook: '', approach_id: null,
-      ...f, buyer_id: req.user.id, at,
+      parent_creative_id: null, iteration: 1,
+      ...f, buyer_id: parent ? parent.buyer_id : req.user.id, at,
     });
     const taskId = r.lastInsertRowid;
     saveFiles(req.files, taskId, req.user.id, 'reference');
-    logHistory({ taskId, taskTitle: f.title, userId: req.user.id, action: 'created', to: 'new', at, details: { priority: f.priority || 'medium', deadline: f.deadline, files: req.files?.length || 0 } });
+    logHistory({ taskId, taskTitle: f.title, userId: req.user.id, action: 'created', to: 'new', at, details: { priority: f.priority || 'medium', deadline: f.deadline, files: req.files?.length || 0, ...(parent ? { parent: code(parent.id), iteration: f.iteration } : {}) } });
     return taskId;
   })();
   res.status(201).json(decorate(db.prepare(`${TASK_LIST_SQL} WHERE t.id = ?`).get(id), req.user));
@@ -250,6 +262,7 @@ app.get('/api/tasks/:id', auth, wrap((req, res) => {
     // последние версии слотов — для сопоставления «новая версия креатива №…» при сдаче правок
     slots: creatives.filter((c) => !creatives.some((x) => x.slot === c.slot && x.version > c.version)),
     durations: computeDurations(task, history),
+    parent_creative: task.parent_creative_id ? shapeCreative(getCreativeRow(task.parent_creative_id)) : null,
   });
 }));
 
@@ -477,7 +490,10 @@ if (fs.existsSync(clientDist)) {
 app.use((err, req, res, _next) => {
   // запрос отклонён — удаляем уже загруженные multer'ом файлы, чтобы не копить мусор
   (req.files || []).forEach((f) => fs.rm(f.path, { force: true }, () => {}));
-  if (err instanceof multer.MulterError) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Файл больше 25 МБ' : err.message });
+  if (err instanceof multer.MulterError) {
+    const limit = req.path.startsWith('/api/metrics/import') ? '2 МБ' : '25 МБ';
+    return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `Файл больше ${limit}` : err.message });
+  }
   const status = err.status || 500;
   if (status >= 500) console.error(err);
   res.status(status).json({ error: status >= 500 ? 'Внутренняя ошибка сервера' : err.message });

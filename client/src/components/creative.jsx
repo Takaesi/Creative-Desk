@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Link2, FileText, Flame, ArrowUp, ArrowDown } from 'lucide-react';
-import { CREATIVE_STATUS, fmtPct1 } from '../utils.js';
+import { CREATIVE_STATUS, fmtPct1, fmtMoney } from '../utils.js';
 import { Avatar } from './ui.jsx';
 
 export const CreativeStatusBadge = ({ s }) => (
@@ -92,5 +92,21 @@ export function CreativeMini({ c, parentRoi }) {
         </span>
       </div>
     </Link>
+  );
+}
+
+/** «Исходный креатив» для задачи-вариации: превью, ROI, CTR, ссылка в библиотеку. */
+export function ParentCreative({ c, className = '' }) {
+  const m = c.metrics_summary;
+  return (
+    <div className={`parent-cr ${className}`}>
+      <div className="parent-cr-thumb"><CreativePreview c={c} hoverPlay={false} /></div>
+      <div className="parent-cr-body">
+        <small className="muted">Исходный креатив · прикреплён как референс</small>
+        <div className="cr-top"><Link to={`/library/${c.id}`} className="card-id">{c.code}</Link><CreativeStatusBadge s={c.status} /></div>
+        <b className="cr-title">{c.title}</b>
+        {m ? <span className="small">ROI <b>{fmtPct1(m.roi)}</b> · CTR <b>{fmtPct1(m.ctr)}</b> · расход {fmtMoney(m.spend)}</span> : <span className="muted small">результатов нет</span>}
+      </div>
+    </div>
   );
 }

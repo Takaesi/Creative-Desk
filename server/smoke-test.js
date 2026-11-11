@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
+import { detectBurnout, computeMetrics, suggestVerdict } from './metrics.js';
 
 // Схема БД версии 1 (до v2) — для проверки миграции
 const OLD_SCHEMA = `
@@ -57,7 +58,7 @@ async function as(email) {
     const res = await fetch(BASE + url, opts);
     return { status: res.status, body: await res.json().catch(() => null) };
   };
-  return { get: (u) => call('GET', u), post: (u, b) => call('POST', u, b || {}), patch: (u, b) => call('PATCH', u, b), del: (u) => call('DELETE', u) };
+  return { get: (u) => call('GET', u), post: (u, b) => call('POST', u, b || {}), patch: (u, b) => call('PATCH', u, b), put: (u, b) => call('PUT', u, b), del: (u) => call('DELETE', u) };
 }
 
 let passed = 0;
@@ -331,6 +332,114 @@ try {
   await step('F2: модалка задачи — у сдач есть коды креативов', async () => {
     const t = (await buyer.get(`/tasks/${flowTask}`)).body;
     assert.ok(t.submissions[0].creatives.length === 2 && t.submissions[0].creatives[0].code.startsWith('CD-'));
+  });
+
+  // ---------- F3: результаты тестов ----------
+  const ymd = (daysAgo) => new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
+  let mc; // принятый креатив байера buyer1
+  await step('F3: валидация метрик и запрет для черновиков', async () => {
+    const list = await crsOf(flowTask);
+    mc = list.find((c) => c.status === 'accepted' && c.slot === 2);
+    assert.equal((await buyer.put(`/creatives/${mc.id}/metrics/${ymd(3)}`, { impressions: 10, clicks: 20 })).status, 400, 'клики > показов');
+    assert.equal((await buyer.put(`/creatives/${mc.id}/metrics/${ymd(-5)}`, { impressions: 10, clicks: 1 })).status, 400, 'дата в будущем');
+    assert.equal((await buyer2.put(`/creatives/${mc.id}/metrics/${ymd(3)}`, { impressions: 10, clicks: 1 })).status, 403, 'чужой байер');
+    const draft = list.find((c) => c.status === 'superseded');
+    assert.equal((await buyer.put(`/creatives/${draft.id}/metrics/${ymd(3)}`, { impressions: 10, clicks: 1 })).status, 409);
+  });
+  await step('F3: первые метрики → in_test; вердикт предлагается только после порога расхода', async () => {
+    let r = await buyer.put(`/creatives/${mc.id}/metrics/${ymd(3)}`, { impressions: 4000, clicks: 80, conversions: 4, spend: 40, revenue: 54 });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.suggested_verdict, null, 'расход 40 < 50');
+    let d = (await buyer.get(`/creatives/${mc.id}`)).body;
+    assert.equal(d.creative.status, 'in_test');
+    assert.ok(d.history.some((h) => h.action === 'creative_status' && h.details.auto));
+    r = await buyer.put(`/creatives/${mc.id}/metrics/${ymd(2)}`, { impressions: 2000, clicks: 40, conversions: 2, spend: 20, revenue: 27 });
+    assert.equal(r.body.suggested_verdict, 'winner', 'ROI 35 % ≥ 30 %');
+    d = (await buyer.get(`/creatives/${mc.id}`)).body;
+    assert.equal(d.metrics_summary.roi, 35);
+    assert.equal(d.creative.status, 'in_test', 'система сама вердикт не ставит');
+  });
+  await step('F3: удаление задачи с результатами → 409', async () => {
+    assert.equal((await lead.del(`/tasks/${flowTask}`)).status, 409);
+  });
+  await step('F3: импорт CSV — dry_run, «;», DD.MM.YYYY, запятые, код в названии, чужие креативы', async () => {
+    const foreign = (await lead.get('/creatives?status=accepted,in_test&limit=200')).body.items.find((c) => c.buyer_id !== 2);
+    const [d1, d2] = [ymd(5), ymd(4)].map((x) => x.split('-').reverse().join('.'));
+    const csv = `\uFEFFКреатив;Дата;Показы;Клики;Конверсии;Расход;Доход\nBR_nutra_CD-${mc.id}_v2;${d1};1000;20;1;10,5;12,25\nCD-${mc.id};${d1};1000;10;1;4,5;5\n${mc.id};${d2};500;600;0;1;0\nCD-999999;${d2};1;0;0;0;0\nCD-${foreign.id};${d2};100;1;0;1;1\n`;
+    const send = (dry) => { const fd = new FormData(); fd.append('file', new Blob([csv], { type: 'text/csv' }), 'r.csv'); return buyer.post(`/metrics/import?dry_run=${dry}`, fd); };
+    const before = (await buyer.get(`/creatives/${mc.id}/metrics`)).body.rows.length;
+    const dry = (await send(1)).body;
+    assert.equal(dry.added, 1, 'две строки на одну дату суммируются');
+    assert.equal(dry.errors.length, 3);
+    assert.ok(dry.errors.some((e) => /клики больше показов/.test(e.message)));
+    assert.ok(dry.errors.some((e) => /CD-999999 не найден/.test(e.message)));
+    assert.ok(dry.errors.some((e) => /другому байеру/.test(e.message)));
+    assert.equal((await buyer.get(`/creatives/${mc.id}/metrics`)).body.rows.length, before, 'dry_run ничего не пишет');
+    const real = (await send(0)).body;
+    assert.equal(real.added, 1);
+    const row = (await buyer.get(`/creatives/${mc.id}/metrics`)).body.rows.find((x) => x.date === ymd(5));
+    assert.deepEqual([row.impressions, row.clicks, row.spend, row.revenue, row.source], [2000, 30, 15, 17.25, 'csv']);
+    const again = (await send(0)).body;
+    assert.deepEqual([again.added, again.updated], [0, 1], 'повторный импорт обновляет, а не дублирует');
+    assert.equal((await cr.post('/metrics/import?dry_run=1', new FormData())).status, 403);
+  });
+
+  // ---------- F4: вариации ----------
+  await step('F4: вариации недоступны для креатива в тесте; доступны победителю', async () => {
+    assert.equal((await buyer.get(`/creatives/${mc.id}/variation-draft`)).status, 409);
+    assert.equal((await buyer.post(`/creatives/${mc.id}/status`, { to: 'winner' })).status, 200);
+    const d = (await buyer.get(`/creatives/${mc.id}`)).body;
+    assert.ok(d.actions.includes('variations'));
+    assert.equal((await buyer2.get(`/creatives/${mc.id}/variation-draft`)).status, 403);
+  });
+  let varTask;
+  await step('F4: задача-вариация получает parent_creative_id и iteration = 2', async () => {
+    const draft = (await buyer.get(`/creatives/${mc.id}/variation-draft`)).body;
+    assert.equal(draft.fields.quantity, 3);
+    assert.equal(draft.fields.priority, 'high');
+    assert.match(draft.fields.description, new RegExp(`CD-${mc.id}`));
+    const r = await lead.post('/tasks', { ...draft.fields });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    varTask = r.body.id;
+    assert.equal(r.body.parent_creative_id, mc.id);
+    assert.equal(r.body.iteration, 2);
+    assert.equal(r.body.buyer_id, 2, 'байер вариации = байер исходного креатива');
+    const t = (await buyer.get(`/tasks/${varTask}`)).body;
+    assert.equal(t.parent_creative.id, mc.id);
+  });
+  await step('F4: креативы задачи-вариации наследуют родителя и видны в «Семействе»', async () => {
+    await cr2.post(`/tasks/${varTask}/take`);
+    await submit(cr2, varTask, { files: ['v1.png', 'v2.png'] });
+    const list = await crsOf(varTask);
+    assert.ok(list.every((c) => c.parent_creative_id === mc.id));
+    const fam = (await buyer.get(`/creatives/${mc.id}`)).body.family;
+    assert.equal(fam.children.length, 2);
+    assert.equal(fam.tasks[0].id, varTask);
+    const child = (await buyer.get(`/creatives/${list[0].id}`)).body;
+    assert.equal(child.family.parent.id, mc.id);
+  });
+  await step('F4: у «не зашёл» вариации недоступны', async () => {
+    await buyer.post(`/creatives/${mc.id}/status`, { to: 'loser' });
+    assert.equal((await buyer.get(`/creatives/${mc.id}/variation-draft`)).status, 409);
+    await buyer.post(`/creatives/${mc.id}/status`, { to: 'winner' });
+  });
+
+  await step('F10: выгорание — ряд с падением CTR даёт сигнал, ровный ряд и 4 дня — нет', async () => {
+    const st = { burnout_drop_pct: 30, burnout_min_days: 5 };
+    const series = (ctrs) => ctrs.map((c, i) => ({ date: `2026-01-${String(i + 1).padStart(2, '0')}`, impressions: 10000, clicks: Math.round(c * 100) }));
+    assert.equal(detectBurnout(series([3.0, 3.1, 2.9, 2.4, 2.0, 1.7]), st).burnout, true);
+    assert.equal(detectBurnout(series([3.0, 2.9, 2.8, 2.7, 2.8]), st).burnout, false);
+    assert.equal(detectBurnout(series([3.0, 2.0, 1.0, 0.5]), st).analyzed, false);
+  });
+  await step('Метрики: формулы и пустые знаменатели', async () => {
+    const m = computeMetrics([{ impressions: 0, clicks: 0, conversions: 0, spend: 0, revenue: 0 }]);
+    assert.deepEqual([m.ctr, m.cr, m.cpa, m.roi, m.profit], [null, null, null, null, 0]);
+    const s2 = computeMetrics([{ impressions: 1000, clicks: 20, conversions: 2, spend: 100, revenue: 150 }]);
+    assert.deepEqual([s2.ctr, s2.cr, s2.cpa, s2.roi], [2, 10, 50, 50]);
+    const th = { verdict_min_spend: 50, verdict_winner_roi: 30, verdict_loser_roi: 0 };
+    assert.equal(suggestVerdict({ spend: 40, roi: 90 }, th), null);
+    assert.equal(suggestVerdict({ spend: 60, roi: 10 }, th), 'average');
+    assert.equal(suggestVerdict({ spend: 60, roi: -1 }, th), 'loser');
   });
 
   await step('Миграция: база старой схемы обновляется без потерь и получает креативы', async () => {

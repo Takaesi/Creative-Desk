@@ -667,3 +667,38 @@ select.input { padding-right: 28px; }
   .kv-3 { grid-template-columns: minmax(0, 1fr); }
   .filters-2 .segmented { width: 100%; }
 }
+
+/* ---------- v2: результаты, импорт, вариации ---------- */
+.res-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.res-tile { background: var(--surface-2); border-radius: 9px; padding: 8px 10px; }
+.res-tile small { display: block; font-size: 11.5px; color: var(--muted); }
+.res-tile b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.res-charts { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.res-chart-title { font-size: 12px; color: var(--text-2); font-weight: 600; }
+.res-chart svg { width: 100%; height: 92px; display: block; cursor: crosshair; overflow: visible; }
+.res-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.res-zero { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.res-cross { stroke: var(--muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.res-axis { font-size: 10.5px; fill: var(--muted); }
+.res-xaxis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding-left: 7%; }
+.res-tip { font-size: 12.5px; min-height: 20px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.verdict-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-size: 13.5px; }
+.verdict-hint > svg { color: var(--accent); flex-shrink: 0; }
+.verdict-hint-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.add-day { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 8px; }
+.add-day label { display: flex; flex-direction: column; gap: 3px; }
+.add-day small { font-size: 11.5px; color: var(--muted); }
+.add-day .input { width: 104px; }
+.add-day input[type=date] { width: 140px; }
+.add-day-warn { flex-basis: 100%; color: var(--warn); font-size: 12.5px; }
+.table-compact td, .table-compact th { padding: 6px 8px; }
+.table-compact .input-sm { width: 88px; height: 28px; }
+.row-actions { white-space: nowrap; text-align: right; }
+.import-hint p { margin: 0 0 6px; font-size: 13px; }
+.import-stats { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13.5px; }
+.import-stats span { display: inline-flex; align-items: center; gap: 5px; }
+.import-errors { margin: 0; padding: 8px 12px 8px 28px; background: var(--danger-soft); color: var(--danger); border-radius: 8px; font-size: 12.5px; max-height: 160px; overflow: auto; }
+.parent-cr { display: flex; gap: 12px; align-items: center; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--accent-soft); border-radius: 10px; padding: 8px; min-width: 0; }
+.parent-cr-thumb { width: 72px; height: 72px; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+.parent-cr-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.card-iter { align-self: flex-start; }

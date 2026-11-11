@@ -12,6 +12,7 @@ import {
 } from '../utils.js';
 import { Avatar, PriorityBadge, StatusBadge, Modal, Field, useToast } from './ui.jsx';
 import TaskForm from './TaskForm.jsx';
+import { ParentCreative } from './creative.jsx';
 
 export default function TaskModal({ id, meta, users, intent, onClose, onChanged }) {
   const { user } = useAuth();
@@ -47,6 +48,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
             <StatusBadge s={task.status} />
             <PriorityBadge p={task.priority} />
             {task.revision_count > 0 && <span className="badge badge-rev"><RotateCcw size={11} /> правок: {task.revision_count}</span>}
+            {task.iteration > 1 && <span className="badge badge-iter">Итерация {task.iteration}{task.parent_creative_id ? ` · от CD-${task.parent_creative_id}` : ''}</span>}
             {task.status === 'revision' && <span className="badge badge-rev">{task.revision_started_at ? 'доработка идёт' : 'ждёт доработки'}</span>}
             {dl && <span className={`badge ${dl.cls}`}>{dl.text}</span>}
           </div>
@@ -104,6 +106,9 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
             {task.description && <div className="desc">{task.description}</div>}
           </section>
 
+          {task.parent_creative && (
+            <section className="panel"><ParentCreative c={task.parent_creative} /></section>
+          )}
           <section className="panel">
             <PanelHead icon={Paperclip} title="Референсы">
               {A.has('upload_reference') && <UploadRefs taskId={task.id} onDone={() => after('Референсы добавлены')} />}

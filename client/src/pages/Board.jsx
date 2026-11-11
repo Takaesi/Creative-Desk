@@ -216,6 +216,7 @@ function TaskCard({ task: t, user, onOpen, onQuick, onIntent, onDragStart }) {
         <PriorityBadge p={t.priority} />
         {t.revision_count > 0 && <span className="badge badge-rev" title="Раундов правок"><RotateCcw size={11} /> {t.revision_count}</span>}
       </div>
+      {t.iteration > 1 && <span className="badge badge-iter card-iter">Итерация {t.iteration}{t.parent_creative_id ? ` · от CD-${t.parent_creative_id}` : ''}</span>}
       {t.status === 'revision' && (
         <div className={`rev-state ${t.revision_started_at ? 'rev-working' : ''}`}>
           {t.revision_started_at ? <>Доработка идёт · {relTime(t.revision_started_at)}</> : 'Ждёт, когда креативщик возьмёт правки'}

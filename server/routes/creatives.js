@@ -1,11 +1,11 @@
 // F2. Креативы и Библиотека.
 import { Router } from 'express';
 import { db, nowIso, logHistory, getSettings } from '../db.js';
-import { allowedCreativeActions, canManageCreative, CREATIVE_STATUSES } from '../domain.js';
-import { HttpError, wrap, auth, idOrNull } from '../http.js';
-import { computeMetrics, derived } from '../metrics.js';
+import { allowedCreativeActions, canManageCreative, CREATIVE_STATUSES, METRIC_STATUSES } from '../domain.js';
+import { HttpError, wrap, auth, idOrNull, memUpload } from '../http.js';
+import { computeMetrics, derived, validateMetricRow, parseMetricsCsv, CSV_TEMPLATE } from '../metrics.js';
 import { computeTaskCost } from '../analytics.js';
-import { setCreativeStatus, CreativeError, code } from '../creatives.js';
+import { setCreativeStatus, CreativeError, code, refreshCreativeAfterMetrics } from '../creatives.js';
 
 const router = Router();
 
@@ -200,6 +200,139 @@ router.post('/creatives/:id/status', auth, wrap((req, res) => {
     }
   })();
   res.json({ ok: true, status, settings: getSettings() });
+}));
+
+// ---------- F3: результаты тестов ----------
+const STATUS_RU = { draft: 'черновик', superseded: 'старая версия', archived: 'в архиве' };
+/** Последняя допустимая дата метрик: «сегодня» с запасом на часовые пояса. */
+const maxMetricDate = () => new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+
+function ensureMetricsAllowed(c, user) {
+  if (!canManageCreative(c, user)) throw new HttpError(403, 'Вносить результаты может байер-владелец или руководитель');
+  if (!METRIC_STATUSES.includes(c.status)) throw new HttpError(409, `Креатив ${code(c.id)} ${STATUS_RU[c.status] ? `— ${STATUS_RU[c.status]}` : ''}: результаты вносятся только после приёмки`);
+}
+
+const UPSERT_METRIC = `INSERT INTO creative_metrics (creative_id, date, impressions, clicks, conversions, spend, revenue, source, created_by, created_at, updated_at)
+  VALUES (@creative_id, @date, @impressions, @clicks, @conversions, @spend, @revenue, @source, @user, @at, @at)
+  ON CONFLICT (creative_id, date) DO UPDATE SET impressions = excluded.impressions, clicks = excluded.clicks, conversions = excluded.conversions,
+    spend = excluded.spend, revenue = excluded.revenue, source = excluded.source, updated_at = excluded.updated_at`;
+
+router.get('/creatives/:id/metrics', auth, wrap((req, res) => {
+  const c = getCreativeRow(req.params.id);
+  const rows = db.prepare('SELECT * FROM creative_metrics WHERE creative_id = ? ORDER BY date').all(c.id).map((r) => ({ ...r, ...derived(r) }));
+  res.json({ rows, summary: rows.length ? computeMetrics(rows) : null });
+}));
+
+router.put('/creatives/:id/metrics/:date', auth, wrap((req, res) => {
+  const c = getCreativeRow(req.params.id);
+  ensureMetricsAllowed(c, req.user);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.params.date) && !Number.isNaN(Date.parse(req.params.date)) ? req.params.date : null;
+  const b = req.body || {};
+  const toNum = (v) => (v === '' || v === null || v === undefined ? 0 : Number(String(v).replace(',', '.')));
+  const row = {
+    date, impressions: toNum(b.impressions), clicks: toNum(b.clicks), conversions: toNum(b.conversions),
+    spend: Math.round(toNum(b.spend) * 100) / 100, revenue: Math.round(toNum(b.revenue) * 100) / 100,
+  };
+  const err = validateMetricRow(row, maxMetricDate());
+  if (err) throw new HttpError(400, `Проверьте данные: ${err}`);
+  const at = nowIso();
+  let result;
+  db.transaction(() => {
+    const existed = !!db.prepare('SELECT 1 FROM creative_metrics WHERE creative_id = ? AND date = ?').get(c.id, date);
+    db.prepare(UPSERT_METRIC).run({ ...row, creative_id: c.id, source: 'manual', user: req.user.id, at });
+    logHistory({ taskId: c.task_id, taskTitle: c.task_title, userId: req.user.id, action: 'metrics_saved', creativeId: c.id, at, details: { code: code(c.id), date, row, updated: existed } });
+    result = refreshCreativeAfterMetrics(c.id, { userId: req.user.id, at });
+    result.updated = existed;
+  })();
+  res.json({ ok: true, updated: result.updated, suggested_verdict: result.suggested, summary: result.summary });
+}));
+
+router.delete('/creatives/:id/metrics/:date', auth, wrap((req, res) => {
+  const c = getCreativeRow(req.params.id);
+  ensureMetricsAllowed(c, req.user);
+  const at = nowIso();
+  db.transaction(() => {
+    const r = db.prepare('DELETE FROM creative_metrics WHERE creative_id = ? AND date = ?').run(c.id, req.params.date);
+    if (!r.changes) throw new HttpError(404, 'Нет данных за эту дату');
+    logHistory({ taskId: c.task_id, taskTitle: c.task_title, userId: req.user.id, action: 'metrics_deleted', creativeId: c.id, at, details: { code: code(c.id), date: req.params.date } });
+    refreshCreativeAfterMetrics(c.id, { userId: req.user.id, at });
+  })();
+  res.json({ ok: true });
+}));
+
+router.get('/metrics/template.csv', auth, (_req, res) => {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="creative-results-template.csv"');
+  res.send(`\uFEFF${CSV_TEMPLATE}`);
+});
+
+router.post('/metrics/import', auth, memUpload.single('file'), wrap((req, res) => {
+  if (!['buyer', 'lead'].includes(req.user.role)) throw new HttpError(403, 'Импорт доступен байерам и руководителю');
+  if (!req.file) throw new HttpError(400, 'Выберите CSV-файл');
+  const dryRun = req.query.dry_run === '1';
+  const { rows, errors } = parseMetricsCsv(req.file.buffer.toString('utf8'), { maxDate: maxMetricDate() });
+  const valid = [];
+  const creativeCache = new Map();
+  for (const r of rows) {
+    if (!creativeCache.has(r.creative_id)) creativeCache.set(r.creative_id, db.prepare('SELECT * FROM creatives WHERE id = ?').get(r.creative_id) || null);
+    const c = creativeCache.get(r.creative_id);
+    const where = `строка ${r.lines.join(', ')}`;
+    if (!c) { errors.push({ row: r.lines[0], message: `${where}: креатив ${code(r.creative_id)} не найден` }); continue; }
+    if (!canManageCreative(c, req.user)) { errors.push({ row: r.lines[0], message: `${where}: креатив ${code(c.id)} принадлежит другому байеру` }); continue; }
+    if (!METRIC_STATUSES.includes(c.status)) { errors.push({ row: r.lines[0], message: `${where}: креатив ${code(c.id)} ещё не принят (${STATUS_RU[c.status] || c.status})` }); continue; }
+    const existed = !!db.prepare('SELECT 1 FROM creative_metrics WHERE creative_id = ? AND date = ?').get(c.id, r.date);
+    valid.push({ ...r, existed });
+  }
+  // ошибки парсера идут без префикса «строка N» — добавим для единообразия
+  const errs = errors.map((e) => ({ row: e.row, message: e.message.startsWith('строка') ? e.message : `строка ${e.row}: ${e.message}` })).sort((a, b) => a.row - b.row);
+  const affected = [...new Set(valid.map((r) => r.creative_id))];
+  const out = {
+    dry_run: dryRun, added: valid.filter((r) => !r.existed).length, updated: valid.filter((r) => r.existed).length,
+    skipped: errs.length, errors: errs.slice(0, 200), affected_creatives: affected,
+    preview: valid.slice(0, 50).map((r) => ({ code: code(r.creative_id), date: r.date, impressions: r.impressions, clicks: r.clicks, conversions: r.conversions, spend: r.spend, revenue: r.revenue, existed: r.existed })),
+  };
+  if (!dryRun && valid.length) {
+    const at = nowIso();
+    db.transaction(() => {
+      const up = db.prepare(UPSERT_METRIC);
+      valid.forEach((r) => up.run({ ...r, source: 'csv', user: req.user.id, at }));
+      affected.forEach((id) => refreshCreativeAfterMetrics(id, { userId: req.user.id, at }));
+      logHistory({ userId: req.user.id, action: 'metrics_imported', at, details: { file: req.file.originalname, added: out.added, updated: out.updated, skipped: out.skipped, creatives: affected.map(code) } });
+    })();
+  }
+  res.json(out);
+}));
+
+// ---------- F4: вариации ----------
+const fmtRu = (n, d = 0) => Number(n).toLocaleString('ru-RU', { maximumFractionDigits: d, minimumFractionDigits: 0 });
+
+router.get('/creatives/:id/variation-draft', auth, wrap((req, res) => {
+  const c = getCreativeRow(req.params.id);
+  if (!canManageCreative(c, req.user)) throw new HttpError(403, 'Заказывать вариации может байер-владелец или руководитель');
+  if (!allowedCreativeActions(c, req.user).includes('variations')) throw new HttpError(409, 'Вариации заказывают для победителей, средних и выгоревших креативов');
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(c.task_id);
+  const shaped = shapeCreative(c);
+  const m = shaped.metrics_summary;
+  const cur = getSettings().currency;
+  const what = { winner: 'креатива-победителя', burned: 'выгоревшего победителя', average: 'креатива' }[c.status];
+  const approach = c.approach_name || 'подход';
+  const lines = [
+    `Сделать вариации ${what} ${code(c.id)}.`,
+    m ? `Результат оригинала: ROI ${fmtRu(m.roi ?? 0)} %, CTR ${fmtRu(m.ctr ?? 0, 1)} % (расход ${fmtRu(m.spend)} ${cur}).` : 'Результатов теста пока нет.',
+    `Сохранить: ${approach}${task.hook ? ` и хук «${task.hook}»` : ''}.`,
+    'Изменить: ______ (визуал / первые 3 секунды / оффер-подачу / персонажа)',
+  ];
+  const offer = c.offer_id ? db.prepare('SELECT * FROM offers WHERE id = ?').get(c.offer_id) : null;
+  res.json({
+    parent: shaped,
+    fields: {
+      title: `Вариации ${code(c.id)}: ${c.title}`.slice(0, 200),
+      offer_id: offer?.is_active ? offer.id : null, offer: offer?.is_active ? offer.name : '',
+      approach_id: c.approach_id, geo: c.geo, creative_type: c.creative_type, language: task.language, format: task.format, hook: task.hook,
+      quantity: 3, priority: 'high', deadline: new Date(Date.now() + 48 * 3600_000).toISOString(),
+      description: lines.join('\n'), references_text: '', parent_creative_id: c.id,
+    },
+  });
 }));
 
 export default router;
