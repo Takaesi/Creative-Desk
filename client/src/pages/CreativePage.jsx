@@ -33,6 +33,10 @@ export default function CreativePage() {
 
   const load = useCallback(() => api.get(`/creatives/${creativeId}`).then(setD).catch((e) => setError(e.message)), [creativeId]);
   useEffect(() => { setD(null); setError(''); load(); }, [load]);
+  // «Внести» из очереди ведёт на #results — прокручиваем к блоку результатов
+  useEffect(() => {
+    if (d && window.location.hash === '#results') document.getElementById('results')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [d]);
 
   // ← / → — предыдущая / следующая версия
   useEffect(() => {

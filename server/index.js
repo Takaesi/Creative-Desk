@@ -5,8 +5,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, nowIso, logHistory, UPLOAD_DIR, runDbMigrations } from './db.js';
-import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions, defaultUnits, allowedCreativeActions } from './domain.js';
+import { db, nowIso, logHistory, UPLOAD_DIR, runDbMigrations, getSettings } from './db.js';
+import { STATUSES, PRIORITIES, CREATIVE_TYPES, AI_SERVICES, GEOS, computeDurations, isOverdue, allowedActions, defaultUnits, allowedCreativeActions, scoreBrief } from './domain.js';
+import { wipInfo } from './workload.js';
+import templatesRouter from './routes/templates.js';
+import queueRouter from './routes/queue.js';
 import { HttpError, wrap, auth, requireRole, upload, fixName, publicUser, idOrNull } from './http.js';
 import dictionariesRouter, { findOffer, findApproach } from './routes/dictionaries.js';
 import creativesRouter, { getCreativeRow, shapeCreative } from './routes/creatives.js';
@@ -62,8 +65,20 @@ const TASK_LIST_SQL = `
   LEFT JOIN users c ON c.id = t.creative_id
   LEFT JOIN approaches ap ON ap.id = t.approach_id`;
 
-function decorate(t, user) {
-  return { ...t, overdue: isOverdue(t), actions: allowedActions(t, user) };
+function decorate(t, user, wip = null) {
+  const out = { ...t, overdue: isOverdue(t), actions: allowedActions(t, user) };
+  // креативщик на WIP-лимите видит «Взять» неактивной; сервер тоже отклонит take (409)
+  if (wip && t.status === 'new' && out.actions.includes('take') && wip.reached) out.take_blocked = `Сначала сдайте одну из текущих задач (лимит ${wip.limit})`;
+  return out;
+}
+
+/** Пересчёт оценки ТЗ на сервере — значению с клиента не доверяем. */
+function recalcBrief(taskId) {
+  const t = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  const refFiles = db.prepare("SELECT COUNT(*) c FROM files WHERE task_id = ? AND kind = 'reference'").get(taskId).c;
+  const { score } = scoreBrief({ ...t, ref_files: refFiles });
+  db.prepare('UPDATE tasks SET brief_score = ? WHERE id = ?').run(score, taskId);
+  return score;
 }
 
 function taskFields(body, { partial = false, current = null } = {}) {
@@ -183,6 +198,8 @@ app.get('/api/users', auth, (req, res) => {
 
 app.use('/api', dictionariesRouter);
 app.use('/api', creativesRouter);
+app.use('/api', templatesRouter);
+app.use('/api', queueRouter);
 
 // ---------- tasks ----------
 app.get('/api/tasks', auth, wrap((req, res) => {
@@ -198,7 +215,8 @@ app.get('/api/tasks', auth, wrap((req, res) => {
   if (type) { where.push('t.creative_type = @type'); params.type = type; }
   const sql = `${TASK_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, t.deadline IS NULL, t.deadline, t.id DESC`;
-  res.json(db.prepare(sql).all(params).map((t) => decorate(t, req.user)));
+  const wip = req.user.role === 'creative' ? wipInfo(req.user.id) : null;
+  res.json(db.prepare(sql).all(params).map((t) => decorate(t, req.user, wip)));
 }));
 
 app.post('/api/tasks', auth, requireRole('buyer', 'lead'), upload.array('files', 10), wrap((req, res) => {
@@ -228,6 +246,11 @@ app.post('/api/tasks', auth, requireRole('buyer', 'lead'), upload.array('files',
     });
     const taskId = r.lastInsertRowid;
     saveFiles(req.files, taskId, req.user.id, 'reference');
+    if (req.body.template_id) {
+      const tpl = db.prepare('SELECT id FROM brief_templates WHERE id = ?').get(idOrNull(req.body.template_id));
+      if (tpl) db.prepare('UPDATE tasks SET template_id = ? WHERE id = ?').run(tpl.id, taskId);
+    }
+    recalcBrief(taskId);
     logHistory({ taskId, taskTitle: f.title, userId: req.user.id, action: 'created', to: 'new', at, details: { priority: f.priority || 'medium', deadline: f.deadline, files: req.files?.length || 0, ...(parent ? { parent: code(parent.id), iteration: f.iteration } : {}) } });
     return taskId;
   })();
@@ -256,13 +279,14 @@ app.get('/api/tasks/:id', auth, wrap((req, res) => {
     'SELECT c.*, u.name AS user_name, u.color AS user_color, u.role AS user_role FROM comments c JOIN users u ON u.id = c.user_id WHERE c.task_id = ? ORDER BY c.created_at'
   ).all(task.id);
   res.json({
-    ...decorate(task, req.user),
+    ...decorate(task, req.user, req.user.role === 'creative' ? wipInfo(req.user.id) : null),
     references: files.filter((f) => f.kind === 'reference'),
     submissions, expenses, comments, history,
     // последние версии слотов — для сопоставления «новая версия креатива №…» при сдаче правок
     slots: creatives.filter((c) => !creatives.some((x) => x.slot === c.slot && x.version > c.version)),
     durations: computeDurations(task, history),
     parent_creative: task.parent_creative_id ? shapeCreative(getCreativeRow(task.parent_creative_id)) : null,
+    brief: scoreBrief({ ...task, ref_files: files.filter((f) => f.kind === 'reference').length }),
   });
 }));
 
@@ -277,8 +301,25 @@ app.patch('/api/tasks/:id', auth, wrap((req, res) => {
     const set = Object.fromEntries(Object.entries(changes).map(([k, v]) => [k, v.to]));
     db.prepare(`UPDATE tasks SET ${Object.keys(set).map((c) => `${c} = @${c}`).join(', ')}, updated_at = @at WHERE id = @id`).run({ ...set, at, id: task.id });
     logHistory({ taskId: task.id, taskTitle: f.title || task.title, userId: req.user.id, action: 'edited', details: changes, at });
+    recalcBrief(task.id);
   }
   res.json({ ok: true, changed: Object.keys(changes) });
+}));
+
+// F6: «Дублировать» — поля задачи для формы нового ТЗ (без файлов-референсов, со ссылками)
+app.get('/api/tasks/:id/duplicate', auth, requireRole('buyer', 'lead'), wrap((req, res) => {
+  const t = getTask(req.params.id);
+  if (t.buyer_id !== req.user.id && req.user.role !== 'lead') throw new HttpError(403, 'Дублировать можно только свои задачи');
+  const offer = t.offer_id ? findOffer(t.offer_id) : null;
+  const approach = t.approach_id ? findApproach(t.approach_id) : null;
+  res.json({
+    title: t.title, offer_id: offer?.is_active ? offer.id : null, offer: offer?.is_active ? offer.name : '',
+    approach_id: approach?.is_active ? approach.id : null, geo: t.geo, creative_type: t.creative_type, quantity: t.quantity,
+    language: t.language, format: t.format, hook: t.hook, description: t.description, references_text: t.references_text,
+    priority: t.priority, estimate_units: t.estimate_units,
+    // срок переносим «относительно»: столько же часов от сейчас, сколько было от создания
+    deadline: t.deadline ? new Date(Date.now() + Math.max(4 * 3600_000, Date.parse(t.deadline) - Date.parse(t.created_at))).toISOString() : null,
+  });
 }));
 
 app.delete('/api/tasks/:id', auth, wrap((req, res) => {
@@ -306,6 +347,9 @@ app.post('/api/tasks/:id/take', auth, wrap((req, res) => {
       db.prepare('UPDATE tasks SET revision_started_at = ?, updated_at = ? WHERE id = ?').run(at, at, task.id);
       logHistory({ taskId: task.id, taskTitle: task.title, userId: req.user.id, action: 'revision_started', details: { round: task.revision_count }, at });
     } else {
+      // правки своей задачи можно начать всегда; лимит проверяется только при взятии новой
+      const wip = wipInfo(req.user.id);
+      if (wip.reached) throw new HttpError(409, `Достигнут лимит одновременных задач (${wip.limit}). Сдайте одну из текущих задач`);
       transition(task, req.user, 'in_progress', { creative_id: req.user.id, taken_at: task.taken_at || nowIso() }, 'taken');
     }
   })();
@@ -379,13 +423,14 @@ app.post('/api/tasks/:id/revision', auth, wrap((req, res) => {
 app.post('/api/tasks/:id/assign', auth, requireRole('lead'), wrap((req, res) => {
   const creative = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'creative'").get(req.body?.creative_id);
   if (!creative) throw new HttpError(400, 'Выберите креативщика');
+  const wipBefore = wipInfo(creative.id);
   db.transaction(() => {
     const task = getTask(req.params.id);
     ensureAction(task, req.user, 'assign');
     const prev = task.creative_id ? db.prepare('SELECT name FROM users WHERE id = ?').get(task.creative_id)?.name : null;
     const at = nowIso();
     if (task.status === 'new') {
-      transition(task, req.user, 'in_progress', { creative_id: creative.id, taken_at: at }, 'assigned', { creative: creative.name, prev });
+      transition(task, req.user, 'in_progress', { creative_id: creative.id, taken_at: at }, 'assigned', { creative: creative.name, prev, over_limit: wipBefore.reached || undefined });
     } else {
       db.prepare('UPDATE tasks SET creative_id = ?, updated_at = ? WHERE id = ?').run(creative.id, at, task.id);
       logHistory({ taskId: task.id, taskTitle: task.title, userId: req.user.id, action: 'assigned', details: { creative: creative.name, prev }, at });
@@ -399,6 +444,7 @@ app.post('/api/tasks/:id/references', auth, upload.array('files', 10), wrap((req
   ensureAction(task, req.user, 'upload_reference');
   if (!req.files?.length) throw new HttpError(400, 'Нет файлов');
   saveFiles(req.files, task.id, req.user.id, 'reference');
+  recalcBrief(task.id);
   logHistory({ taskId: task.id, taskTitle: task.title, userId: req.user.id, action: 'references_added', details: { files: req.files.map((f) => fixName(f.originalname)) } });
   res.json({ ok: true });
 }));

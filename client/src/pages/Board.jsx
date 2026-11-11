@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Plus, Search, Coins, MessageSquare, RotateCcw, Paperclip, Clock, ArrowRight, Inbox, RefreshCw } from 'lucide-react';
 import { api, qs } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -31,7 +31,9 @@ export default function Board() {
   const [filters, setFilters] = useState(() => {
     try { return JSON.parse(localStorage.getItem('board-filters')) || {}; } catch { return {}; }
   });
-  const [intent, setIntent] = useState(null);
+  const location = useLocation();
+  // действие, с которым пришли из «Моей очереди» (Сдать / Открыть / Назначить)
+  const [intent, setIntent] = useState(location.state?.intent || null);
   const [dragOver, setDragOver] = useState(null);
   const dragTask = useRef(null);
 
@@ -198,7 +200,7 @@ export default function Board() {
 function TaskCard({ task: t, user, onOpen, onQuick, onIntent, onDragStart }) {
   const dl = deadlineInfo(t);
   const primary =
-    t.actions.includes('take') ? { a: 'take', label: t.status === 'revision' ? 'Начать правки' : 'Взять в работу', quick: true } :
+    t.actions.includes('take') ? { a: 'take', label: t.status === 'revision' ? 'Начать правки' : 'Взять в работу', quick: true, blocked: t.take_blocked } :
     t.actions.includes('submit') ? { a: 'submit', label: 'Сдать работу' } :
     t.actions.includes('accept') ? { a: 'accept', label: 'Проверить' } : null;
 
@@ -247,6 +249,8 @@ function TaskCard({ task: t, user, onOpen, onQuick, onIntent, onDragStart }) {
       {primary && t.status !== 'done' && (
         <button
           className="btn btn-sm btn-soft card-action"
+          disabled={!!primary.blocked}
+          title={primary.blocked || undefined}
           onClick={(e) => { e.stopPropagation(); primary.quick ? onQuick(primary.a) : onIntent(primary.a); }}
         >
           {primary.label}

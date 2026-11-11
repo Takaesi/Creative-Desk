@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Sparkles, LogIn, KanbanSquare, Timer, Coins, BarChart3 } from 'lucide-react';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -7,6 +8,7 @@ import { ROLE } from '../utils.js';
 
 export default function Login() {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -18,7 +20,8 @@ export default function Login() {
   const submit = async (e, creds) => {
     e?.preventDefault();
     setBusy(true); setError('');
-    try { await login(creds?.email ?? email, creds?.password ?? password); }
+    // стартовая страница для всех ролей — «Моя очередь»
+    try { await login(creds?.email ?? email, creds?.password ?? password); navigate('/queue', { replace: true }); }
     catch (err) { setError(err.message); }
     finally { setBusy(false); }
   };

@@ -180,7 +180,7 @@ export function seed() {
       const angle = APPROACHES[apIdx].name;
       // качество ТЗ: от него зависит вероятность правок — чтобы связь была видна в аналитике
       const quality = rand() < 0.55 ? 'good' : rand() < 0.5 ? 'mid' : 'bad';
-      const qty = type === 'Статика' || type === 'Баннер' ? Math.ceil(between(3, 10)) : Math.ceil(between(1, 4));
+      const qty = type === 'Статика' || type === 'Баннер' ? Math.ceil(between(3, 8)) : type === 'Плейабл' ? 1 : Math.ceil(between(1, 3));
       const priority = rand() < 0.12 ? 'urgent' : rand() < 0.3 ? 'high' : rand() < 0.75 ? 'medium' : 'low';
       const buyer = pick(buyers);
       // распределяем создание по последним 30 дням, часть задач — совсем свежие
@@ -299,7 +299,26 @@ export function seed() {
     }
 
     seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit, lead });
+    seedTemplates({ lead, buyers, offerIds, approachIds, iso, now });
   })();
+}
+
+function seedTemplates({ lead, buyers, offerIds, approachIds, iso, now }) {
+  const ins = db.prepare(`INSERT INTO brief_templates (name, owner_id, is_shared, offer_id, approach_id, geo, creative_type, quantity, language, format, hook,
+    description, references_text, priority, deadline_hours, use_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const at = iso(now - 20 * 24 * H);
+  const rows = [
+    ['UGC-отзыв 9:16', lead, 1, null, approachIds[1], null, 'UGC', 3, null, '9:16, 1080×1920, 20–30 сек', 'Селфи-видео: «Я не верила, пока не попробовала сама…»',
+      'Живой отзыв от лица покупателя: проблема → как нашёл продукт → результат → CTA. Субтитры крупно, без музыки на фоне голоса. Без обещаний «гарантированно».',
+      'https://www.facebook.com/ads/library/?id=demo-ugc', 'high', 48, 14],
+    ['Статика для пушей', lead, 1, null, approachIds[5], null, 'Статика', 6, null, '1080×1080 и 720×480', 'Крупная цифра скидки и таймер',
+      'Набор статичных картинок для пуш-сетей: крупный оффер, контрастная кнопка, минимум текста. Разные фоны и цвета кнопки.', '', 'medium', 24, 9],
+    ['Видео «до/после» 15 сек', buyers[0], 0, offerIds[0], approachIds[2], 'BR', 'Видео', 2, 'португальский', '9:16, 15 сек', 'Сплит-экран до/после в первую секунду',
+      'Сравнение до/после, плавный переход, в конце — упаковка продукта и CTA. Озвучка на языке ГЕО.', 'https://drive.google.com/drive/folders/demo-before-after', 'medium', 72, 6],
+    ['Баннеры 4 размера', buyers[1], 0, null, null, null, 'Баннер', 4, null, '300×250, 728×90, 160×600, 320×50', '',
+      'Один визуал в четырёх размерах для Google Display. Логотип оффера, короткий заголовок, кнопка.', '', 'low', 96, 3],
+  ];
+  rows.forEach((r) => ins.run(...r, at, at));
 }
 
 const DAY = 24 * H;

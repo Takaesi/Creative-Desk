@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   X, Play, Send, CheckCircle2, RotateCcw, Pencil, Trash2, UserPlus, Undo2, Link2, FileText, Download,
-  Upload, Coins, Plus, MessageSquare, History, Timer, Paperclip,
+  Upload, Coins, Plus, MessageSquare, History, Timer, Paperclip, Copy,
 } from 'lucide-react';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -11,12 +11,14 @@ import {
   deadlineInfo, splitLinks, isUrl, relTime, DICT_ENTITY, CREATIVE_STATUS,
 } from '../utils.js';
 import { Avatar, PriorityBadge, StatusBadge, Modal, Field, useToast } from './ui.jsx';
-import TaskForm from './TaskForm.jsx';
+import TaskForm, { BriefPanel } from './TaskForm.jsx';
+import { useNewTask } from '../newTask.jsx';
 import { ParentCreative } from './creative.jsx';
 
 export default function TaskModal({ id, meta, users, intent, onClose, onChanged }) {
   const { user } = useAuth();
   const toast = useToast();
+  const { openNew } = useNewTask();
   const [task, setTask] = useState(null);
   const [error, setError] = useState('');
   const [dialog, setDialog] = useState(intent); // submit | revision | accept | assign | edit
@@ -61,7 +63,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
 
       <div className="tm-actions">
         {A.has('take') && (
-          <button className="btn btn-primary" onClick={() => run(() => api.post(`/tasks/${task.id}/take`), task.status === 'revision' ? 'Доработка начата' : 'Задача в работе')}>
+          <button className="btn btn-primary" disabled={!!task.take_blocked} title={task.take_blocked || undefined} onClick={() => run(() => api.post(`/tasks/${task.id}/take`), task.status === 'revision' ? 'Доработка начата' : 'Задача в работе')}>
             <Play size={15} /> {task.status === 'revision' ? 'Начать правки' : 'Взять в работу'}
           </button>
         )}
@@ -76,6 +78,11 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
         )}
         <span className="spacer" />
         {A.has('edit') && <button className="btn btn-ghost" onClick={() => setDialog('edit')}><Pencil size={15} /> Редактировать</button>}
+        {(task.buyer_id === user.id || user.role === 'lead') && (
+          <button className="btn btn-ghost" title="Создать новое ТЗ с теми же полями" onClick={async () => {
+            try { const f = await api.get(`/tasks/${task.id}/duplicate`); onClose(); openNew(f); } catch (e) { toast(e.message, 'error'); }
+          }}><Copy size={15} /> Дублировать</button>
+        )}
         {A.has('delete') && (
           <button className="btn btn-ghost btn-danger-text" onClick={async () => {
             if (!confirm(`Удалить задачу #${task.id}? Действие необратимо.`)) return;
@@ -146,6 +153,8 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
         </div>
 
         <div className="tm-right">
+          {task.take_blocked && <p className="form-error small">{task.take_blocked}</p>}
+          {task.brief && user.role !== 'creative' && <section className="panel"><BriefPanel brief={task.brief} compact /></section>}
           <TimePanel task={task} />
           <ExpensesPanel task={task} meta={meta} canAdd={A.has('expense')} user={user} onChanged={() => { load(); onChanged?.(); }} />
         </div>

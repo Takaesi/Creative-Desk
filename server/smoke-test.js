@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { detectBurnout, computeMetrics, suggestVerdict } from './metrics.js';
+import { scoreBrief } from '../shared/brief.js';
 
 // Схема БД версии 1 (до v2) — для проверки миграции
 const OLD_SCHEMA = `
@@ -126,6 +127,9 @@ try {
     assert.equal((await buyer.patch('/users/5', { hourly_rate_rub: 1 })).status, 403);
     assert.equal((await lead.patch('/users/5', { capacity_units: 0 })).status, 400);
     assert.equal((await lead.patch('/users/5', { hourly_rate_rub: 900, wip_limit: null })).status, 200);
+    // для сквозных сценариев ниже лимит не должен мешать — сам лимит проверяется отдельно (F8)
+    await lead.patch('/users/5', { wip_limit: 30 });
+    await lead.patch('/users/6', { wip_limit: 30 });
   });
   await step('F8: трудоёмкость по умолчанию — «Видео × 2» = 6 units', async () => {
     const offerId = (await buyer.get('/dictionaries')).body.offers.find((o) => o.is_active).id;
@@ -422,6 +426,86 @@ try {
     await buyer.post(`/creatives/${mc.id}/status`, { to: 'loser' });
     assert.equal((await buyer.get(`/creatives/${mc.id}/variation-draft`)).status, 409);
     await buyer.post(`/creatives/${mc.id}/status`, { to: 'winner' });
+  });
+
+  // ---------- F5: «Моя очередь» ----------
+  const rawDb = () => new Database(path.join(dataDir, 'app.db'));
+  await step('F5: очередь отдаёт фиксированные блоки для каждой роли', async () => {
+    const keys = async (who) => (await who.get('/queue')).body.blocks.map((b) => b.key);
+    assert.deepEqual(await keys(cr), ['revisions_waiting', 'in_work', 'available', 'my_stats']);
+    assert.deepEqual(await keys(buyer), ['to_review', 'burning', 'need_results', 'need_verdict', 'my_tasks', 'recent_winners']);
+    assert.deepEqual(await keys(lead), ['overdue', 'urgent_unassigned', 'stuck_review', 'load_issues', 'team_burning', 'week_kpi']);
+    const b = (await buyer.get('/queue')).body.blocks.find((x) => x.key === 'to_review');
+    assert.ok(b.items.length <= 5 && b.count >= b.items.length);
+  });
+  await step('F5/F8: WIP-лимит — взять новую нельзя (409, кнопка неактивна), начать правки можно', async () => {
+    const cr4 = await as('creative4@demo.ru');
+    await lead.patch('/users/8', { wip_limit: 30 });
+    const a = await newTask(); const b = await newTask(); const c = await newTask();
+    assert.equal((await cr4.post(`/tasks/${a}/take`)).status, 200);
+    await submit(cr4, a, { links: 'https://x.com/a' });
+    await buyer.post(`/tasks/${a}/revision`, { comment: 'ещё раз' });
+    assert.equal((await cr4.post(`/tasks/${b}/take`)).status, 200);
+    await lead.patch('/users/8', { wip_limit: 1 });
+    const r = await cr4.post(`/tasks/${c}/take`);
+    assert.equal(r.status, 409);
+    assert.match(r.body.error, /лимит/);
+    assert.ok((await cr4.get('/tasks')).body.find((t) => t.id === c).take_blocked, 'на доске кнопка неактивна');
+    const avail = (await cr4.get('/queue')).body.blocks.find((x) => x.key === 'available');
+    assert.ok(avail.wip.reached && avail.items.every((t) => t.take_blocked));
+    assert.equal((await cr4.post(`/tasks/${a}/take`)).status, 200, 'правки своей задачи — всегда');
+    await lead.patch('/users/8', { wip_limit: null });
+  });
+  await step('F5: задача на проверке > 24 ч — у руководителя в «Зависло на проверке»', async () => {
+    const tid = await newTask();
+    await cr2.post(`/tasks/${tid}/take`);
+    await submit(cr2, tid, { links: 'https://x.com/s' });
+    const d = rawDb(); d.prepare('UPDATE tasks SET submitted_at = ? WHERE id = ?').run(new Date(Date.now() - 30 * 3600_000).toISOString(), tid); d.close();
+    const stuck = (await lead.get('/queue?full=1')).body.blocks.find((x) => x.key === 'stuck_review');
+    assert.ok(stuck.items.some((t) => t.id === tid));
+    const fresh = (await lead.get('/queue?full=1')).body.blocks.find((x) => x.key === 'stuck_review');
+    assert.ok(fresh.items.every((t) => t.waiting_ms > 24 * 3600_000), 'свежие сдачи туда не попадают');
+  });
+  await step('F5: принятый 4 дня назад креатив без метрик — у байера в «Внесите результаты»', async () => {
+    const c = (await crsOf(flowTask)).find((x) => x.slot === 1 && x.version === 2);
+    const d = rawDb(); d.prepare('UPDATE creatives SET accepted_at = ? WHERE id = ?').run(new Date(Date.now() - 4 * 86400000).toISOString(), c.id); d.close();
+    const block = (await buyer.get('/queue?full=1')).body.blocks.find((x) => x.key === 'need_results');
+    assert.ok(block.items.some((x) => x.id === c.id));
+  });
+
+  // ---------- F6: шаблоны и качество ТЗ ----------
+  await step('F6: шаблон с deadline_hours = 48 даёт дедлайн «сейчас + 48 ч»', async () => {
+    const t = (await buyer.post('/templates', { name: 'Мой UGC', creative_type: 'UGC', quantity: 2, deadline_hours: 48, hook: 'Отзыв' })).body;
+    const f = (await buyer.post(`/templates/${t.id}/use`)).body;
+    assert.ok(Math.abs(Date.parse(f.deadline) - (Date.now() + 48 * 3600_000)) < 60_000);
+    assert.equal(f.creative_type, 'UGC');
+    const list = (await buyer.get('/templates')).body;
+    assert.equal(list.find((x) => x.id === t.id).use_count, 1);
+  });
+  await step('F6: чужие личные шаблоны не видны и не редактируются; общие ставит только руководитель', async () => {
+    const own = (await buyer2.post('/templates', { name: 'Личный шаблон Кати' })).body;
+    assert.ok(!(await buyer.get('/templates')).body.some((x) => x.id === own.id));
+    assert.equal((await buyer.patch(`/templates/${own.id}`, { name: 'x' })).status, 403);
+    assert.equal((await buyer.post(`/templates/${own.id}/use`)).status, 403);
+    assert.equal((await buyer.post('/templates', { name: 'Общий?', is_shared: true })).status, 403);
+    assert.equal((await lead.patch(`/templates/${own.id}`, { is_shared: true })).status, 200);
+    assert.ok((await buyer.get('/templates')).body.some((x) => x.id === own.id), 'общий виден всем байерам');
+    assert.equal((await cr.get('/templates')).status, 403);
+  });
+  await step('F6: оценка ТЗ считается на сервере той же функцией; пустое ТЗ ≤ 40 баллов', async () => {
+    const deadline = new Date(Date.now() + 2 * 86400000).toISOString();
+    const r = await buyer.post('/tasks', { offer_id: offerId, geo: 'BR', creative_type: 'Видео', deadline, brief_score: 100 });
+    assert.ok(r.body.brief_score <= 40, `оценка ${r.body.brief_score}`);
+    const full = { offer_id: offerId, geo: 'BR', creative_type: 'Видео', deadline, approach_id: 1, language: 'португальский', format: '9:16, 30 сек',
+      hook: 'Врач в кадре', references_text: 'https://ref', description: 'Подробное описание задачи: показать продукт крупно, боль зрителя, отзыв, призыв к действию в конце ролика.' };
+    const r2 = await buyer.post('/tasks', full);
+    assert.equal(r2.body.brief_score, scoreBrief({ ...full, created_at: r2.body.created_at }).score);
+    assert.equal(r2.body.brief_score, 100);
+    const d = (await buyer.get(`/tasks/${r2.body.id}`)).body;
+    assert.equal(d.brief.score, 100);
+    const dup = (await buyer.get(`/tasks/${r2.body.id}/duplicate`)).body;
+    assert.equal(dup.hook, 'Врач в кадре');
+    assert.equal((await buyer2.get(`/tasks/${r2.body.id}/duplicate`)).status, 403);
   });
 
   await step('F10: выгорание — ряд с падением CTR даёт сигнал, ровный ряд и 4 дня — нет', async () => {

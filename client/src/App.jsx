@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { KanbanSquare, BarChart3, History, LogOut, Sparkles, Settings as SettingsIcon, Images, Plus, ListTodo } from 'lucide-react';
 import { NewTaskProvider, useNewTask } from './newTask.jsx';
 import Library from './pages/Library.jsx';
+import Queue from './pages/Queue.jsx';
 import CreativePage from './pages/CreativePage.jsx';
 import { DictProvider } from './dicts.jsx';
 import Settings from './pages/Settings.jsx';
@@ -34,6 +35,7 @@ export default function App() {
           </div>
           {user.role !== 'creative' && <NewTaskButton />}
           <nav>
+            <NavLink to="/queue"><ListTodo size={18} /><span>Моя очередь</span></NavLink>
             <NavLink to="/board"><KanbanSquare size={18} /><span>Доска задач</span></NavLink>
             <NavLink to="/library"><Images size={18} /><span>Библиотека</span></NavLink>
             {isLead && <NavLink to="/analytics"><BarChart3 size={18} /><span>Аналитика</span></NavLink>}
@@ -51,6 +53,7 @@ export default function App() {
         </aside>
         <main className="main">
           <Routes>
+            <Route path="/queue" element={<Queue />} />
             <Route path="/board" element={<Board />} />
             <Route path="/board/:taskId" element={<Board />} />
             <Route path="/library" element={<Library />} />
@@ -58,7 +61,7 @@ export default function App() {
             {isLead && <Route path="/analytics" element={<Analytics />} />}
             <Route path="/activity" element={<Activity />} />
             {user.role !== 'creative' && <Route path="/settings" element={<Settings />} />}
-            <Route path="*" element={<Navigate to={isLead ? '/analytics' : '/board'} replace />} />
+            <Route path="*" element={<Navigate to="/queue" replace />} />
           </Routes>
         </main>
       </div>

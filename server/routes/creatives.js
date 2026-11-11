@@ -119,6 +119,11 @@ router.get('/creatives', auth, wrap((req, res) => {
   });
 }));
 
+/** Креативы по произвольному условию — для «Моей очереди» и других сводок. */
+export function queryCreatives(where, params = {}, order = 'c.id DESC') {
+  return db.prepare(`${METRICS_CTE} ${CREATIVE_SELECT} WHERE ${where} ORDER BY ${order}`).all(params).map(shapeCreative);
+}
+
 export function getCreativeRow(id) {
   const c = db.prepare(`${METRICS_CTE} ${CREATIVE_SELECT} WHERE c.id = ?`).get(id);
   if (!c) throw new HttpError(404, 'Креатив не найден');
