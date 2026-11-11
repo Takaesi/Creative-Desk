@@ -230,8 +230,8 @@ try {
     assert.equal((await buyer.patch(`/tasks/${id}`, { title: 'x' })).status, 403);
   });
   await step('редактирование логирует изменённые поля', async () => {
-    const fresh = (await buyer.get('/tasks?mine=1')).body.find((t) => t.status === 'new');
-    assert.ok(fresh, 'есть новая задача байера');
+    const fresh = (await buyer.post('/tasks', { offer: 'Edit Offer', geo: 'RU', creative_type: 'Баннер', deadline: new Date(Date.now() + 86400000).toISOString() })).body;
+    assert.ok(fresh.id, 'задача создана');
     assert.equal((await buyer.patch(`/tasks/${fresh.id}`, { priority: 'urgent', quantity: 7 })).status, 200);
     const h = (await buyer.get(`/tasks/${fresh.id}`)).body.history.at(-1);
     assert.equal(h.action, 'edited');
