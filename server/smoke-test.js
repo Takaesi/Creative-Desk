@@ -9,6 +9,8 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { detectBurnout, computeMetrics, suggestVerdict } from './metrics.js';
 import { scoreBrief } from '../shared/brief.js';
+import { buildSlotMap } from '../shared/slots.js';
+import { parseMetricsCsv } from './metrics.js';
 
 // Схема БД версии 1 (до v2) — для проверки миграции
 const OLD_SCHEMA = `
@@ -69,7 +71,7 @@ try {
   await waitUp();
   const buyer = await as('buyer1@demo.ru');
   const buyer2 = await as('buyer2@demo.ru');
-  const cr = await as('creative1@demo.ru');
+  const cr = await as('creative4@demo.ru');
   const cr2 = await as('creative2@demo.ru');
   const lead = await as('lead@demo.ru');
   let id;
@@ -127,9 +129,6 @@ try {
     assert.equal((await buyer.patch('/users/5', { hourly_rate_rub: 1 })).status, 403);
     assert.equal((await lead.patch('/users/5', { capacity_units: 0 })).status, 400);
     assert.equal((await lead.patch('/users/5', { hourly_rate_rub: 900, wip_limit: null })).status, 200);
-    // для сквозных сценариев ниже лимит не должен мешать — сам лимит проверяется отдельно (F8)
-    await lead.patch('/users/5', { wip_limit: 30 });
-    await lead.patch('/users/6', { wip_limit: 30 });
   });
   await step('F8: трудоёмкость по умолчанию — «Видео × 2» = 6 units', async () => {
     const offerId = (await buyer.get('/dictionaries')).body.offers.find((o) => o.is_active).id;
@@ -244,10 +243,10 @@ try {
   });
   await step('руководитель назначает исполнителя', async () => {
     const t = (await lead.get('/tasks')).body.find((x) => x.status === 'new');
-    assert.equal((await lead.post(`/tasks/${t.id}/assign`, { creative_id: 6 })).status, 200);
+    assert.equal((await lead.post(`/tasks/${t.id}/assign`, { creative_id: 8 })).status, 200);
     const d = (await lead.get(`/tasks/${t.id}`)).body;
     assert.equal(d.status, 'in_progress');
-    assert.equal(d.creative_id, 6);
+    assert.equal(d.creative_id, 8);
   });
   await step('аналитика доступна только руководителю и учитывает новые расходы', async () => {
     assert.equal((await buyer.get('/analytics')).status, 403);
@@ -307,6 +306,23 @@ try {
     assert.equal((await buyer.post(`/tasks/${flowTask}/accept`)).status, 200);
     list = await crsOf(flowTask);
     assert.deepEqual(list.map((c) => [c.slot, c.version, c.status]), [[1, 1, 'superseded'], [1, 2, 'accepted'], [2, 1, 'accepted']]);
+  });
+  await step('F2: slot_map из формы сдачи — «новая версия креатива №2» обновляет слот 2, слот 1 v1 принимается', async () => {
+    const tid = await newTask();
+    await cr2.post(`/tasks/${tid}/take`);
+    await submit(cr2, tid, { files: ['first.png', 'second.png'] });
+    await buyer.post(`/tasks/${tid}/revision`, { comment: 'поправь второй' });
+    await cr2.post(`/tasks/${tid}/take`);
+    // форма: прошлые слоты из карточки задачи, один новый файл, пользователь выбрал «Новая версия креатива №2»
+    const { slots } = (await cr2.get(`/tasks/${tid}`)).body;
+    assert.deepEqual(slots.map((x) => x.slot), [1, 2]);
+    const slotMap = buildSlotMap(slots, 1, { 0: '2' });
+    assert.deepEqual(slotMap, [2]);
+    assert.deepEqual(buildSlotMap(slots, 1), [1], 'без выбора — по порядку');
+    assert.equal((await submit(cr2, tid, { files: ['second-v2.png'], slotMap, hours: '1' })).status, 200);
+    assert.equal((await buyer.post(`/tasks/${tid}/accept`)).status, 200);
+    const list = await crsOf(tid);
+    assert.deepEqual(list.map((x) => [x.slot, x.version, x.status]), [[1, 1, 'accepted'], [2, 1, 'superseded'], [2, 2, 'accepted']]);
   });
   await step('F2: права на статус креатива — креативщик и чужой байер получают 403', async () => {
     const c = (await crsOf(flowTask)).find((x) => x.status === 'accepted');
@@ -438,23 +454,38 @@ try {
     const b = (await buyer.get('/queue')).body.blocks.find((x) => x.key === 'to_review');
     assert.ok(b.items.length <= 5 && b.count >= b.items.length);
   });
+  await step('Сид соблюдает WIP-лимиты, у одного креативщика лимит 2', async () => {
+    const d = rawDb();
+    const rows = d.prepare(`SELECT u.id, COALESCE(u.wip_limit, 3) AS lim,
+      (SELECT COUNT(*) FROM tasks t WHERE t.creative_id = u.id AND (t.status = 'in_progress' OR (t.status = 'revision' AND t.revision_started_at IS NOT NULL))) AS wip
+      FROM users u WHERE u.role = 'creative' AND u.email LIKE 'creative%@demo.ru'`).all();
+    d.close();
+    assert.ok(rows.some((r) => r.lim === 2), 'есть креативщик с лимитом 2');
+    // тесты выше могли добавить задачи только тем, у кого был запас; лимит нигде не превышен
+    assert.ok(rows.every((r) => r.wip <= r.lim), JSON.stringify(rows));
+  });
   await step('F5/F8: WIP-лимит — взять новую нельзя (409, кнопка неактивна), начать правки можно', async () => {
-    const cr4 = await as('creative4@demo.ru');
-    await lead.patch('/users/8', { wip_limit: 30 });
-    const a = await newTask(); const b = await newTask(); const c = await newTask();
-    assert.equal((await cr4.post(`/tasks/${a}/take`)).status, 200);
-    await submit(cr4, a, { links: 'https://x.com/a' });
+    const cr3 = await as('creative3@demo.ru'); // лимит 2 из демо-данных, лимиты в тесте не меняем
+    const wipNow = async () => (await cr3.get('/queue')).body.blocks.find((x) => x.key === 'available').wip;
+    let w = await wipNow();
+    assert.equal(w.limit, 2);
+    assert.ok(w.count < w.limit, 'в демо у креативщика есть свободный слот');
+    // задача уходит на правки, но доработка ещё не начата — в WIP не считается
+    const a = await newTask();
+    assert.equal((await cr3.post(`/tasks/${a}/take`)).status, 200);
+    await submit(cr3, a, { links: 'https://x.com/a' });
     await buyer.post(`/tasks/${a}/revision`, { comment: 'ещё раз' });
-    assert.equal((await cr4.post(`/tasks/${b}/take`)).status, 200);
-    await lead.patch('/users/8', { wip_limit: 1 });
-    const r = await cr4.post(`/tasks/${c}/take`);
+    for (w = await wipNow(); !w.reached; w = await wipNow()) {
+      assert.equal((await cr3.post(`/tasks/${await newTask()}/take`)).status, 200);
+    }
+    const c = await newTask();
+    const r = await cr3.post(`/tasks/${c}/take`);
     assert.equal(r.status, 409);
     assert.match(r.body.error, /лимит/);
-    assert.ok((await cr4.get('/tasks')).body.find((t) => t.id === c).take_blocked, 'на доске кнопка неактивна');
-    const avail = (await cr4.get('/queue')).body.blocks.find((x) => x.key === 'available');
+    assert.ok((await cr3.get('/tasks')).body.find((t) => t.id === c).take_blocked, 'на доске кнопка неактивна');
+    const avail = (await cr3.get('/queue')).body.blocks.find((x) => x.key === 'available');
     assert.ok(avail.wip.reached && avail.items.every((t) => t.take_blocked));
-    assert.equal((await cr4.post(`/tasks/${a}/take`)).status, 200, 'правки своей задачи — всегда');
-    await lead.patch('/users/8', { wip_limit: null });
+    assert.equal((await cr3.post(`/tasks/${a}/take`)).status, 200, 'правки своей задачи — всегда, даже на лимите');
   });
   await step('F5: задача на проверке > 24 ч — у руководителя в «Зависло на проверке»', async () => {
     const tid = await newTask();
@@ -508,6 +539,15 @@ try {
     assert.equal((await buyer2.get(`/tasks/${r2.body.id}/duplicate`)).status, 403);
   });
 
+  await step('F3: синонимы колонки креатива в CSV (объявление, ad name, sub_id…)', async () => {
+    for (const h of ['объявление', 'Название', 'ad', 'Ad Name', 'ad_name', 'creative name', 'sub_id', 'SubID']) {
+      const { rows, errors } = parseMetricsCsv(`${h},date,impressions,clicks,conversions,spend,revenue\nBR_nutra_CD-77_v2,2026-01-05,100,5,1,10,20\n`);
+      assert.equal(errors.length, 0, `${h}: ${JSON.stringify(errors)}`);
+      assert.equal(rows[0].creative_id, 77, h);
+    }
+    const both = parseMetricsCsv('ad name,creative,date,impressions,clicks,conversions,spend,revenue\nBR_CD-1,CD-2,2026-01-05,100,5,1,10,20\n');
+    assert.equal(both.rows[0].creative_id, 2, 'точная колонка кода приоритетнее названия объявления');
+  });
   await step('F10: выгорание — ряд с падением CTR даёт сигнал, ровный ряд и 4 дня — нет', async () => {
     const st = { burnout_drop_pct: 30, burnout_min_days: 5 };
     const series = (ctrs) => ctrs.map((c, i) => ({ date: `2026-01-${String(i + 1).padStart(2, '0')}`, impressions: 10000, clicks: Math.round(c * 100) }));

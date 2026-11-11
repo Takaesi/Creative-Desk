@@ -61,7 +61,8 @@ export function detectBurnout(rows, settings) {
 
 // ---------- CSV ----------
 const HEADER_SYNONYMS = {
-  creative: ['creative', 'креатив', 'code', 'код'],
+  // порядок важен: точные названия колонки кода — раньше «названий объявления»
+  creative: ['creative', 'креатив', 'code', 'код', 'ad name', 'ad_name', 'creative name', 'объявление', 'название', 'ad', 'sub_id', 'subid'],
   date: ['date', 'дата'],
   impressions: ['impressions', 'показы'],
   clicks: ['clicks', 'клики'],
@@ -140,8 +141,10 @@ export function parseMetricsCsv(text, { maxDate } = {}) {
   const headers = splitCsvLine(headerLine, sep).map((h) => h.toLowerCase().replace(/^"|"$/g, ''));
   const col = {};
   for (const [key, syn] of Object.entries(HEADER_SYNONYMS)) {
-    const idx = headers.findIndex((h) => syn.includes(h));
-    if (idx >= 0) col[key] = idx;
+    for (const name of syn) {
+      const idx = headers.indexOf(name);
+      if (idx >= 0) { col[key] = idx; break; }
+    }
   }
   const missing = Object.keys(HEADER_SYNONYMS).filter((k) => col[k] === undefined);
   if (missing.length) return { rows: [], errors: [{ row: 1, message: `нет колонок: ${missing.join(', ')}` }] };

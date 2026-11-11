@@ -298,9 +298,39 @@ export function seed() {
       );
     }
 
+    enforceWipLimits(creatives);
     seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit, lead });
     seedTemplates({ lead, buyers, offerIds, approachIds, iso, now });
   })();
+}
+
+/**
+ * Демо должно соблюдать WIP-лимиты: симуляция раздаёт задачи без оглядки на них,
+ * поэтому лишние активные задачи целиком (сдачи, креативы, расходы, история) передаются
+ * креативщикам со свободным лимитом. Если свободных нет — доработка по правкам «откладывается».
+ */
+function enforceWipLimits(creativeIds) {
+  const def = getSettings().wip_limit_default;
+  const ACTIVE = "(status = 'in_progress' OR (status = 'revision' AND revision_started_at IS NOT NULL))";
+  const limitOf = (id) => db.prepare('SELECT wip_limit FROM users WHERE id = ?').get(id).wip_limit ?? def;
+  const active = (id) => db.prepare(`SELECT id FROM tasks WHERE creative_id = ? AND ${ACTIVE} ORDER BY deadline DESC`).all(id);
+  const moveTask = (taskId, from, to) => {
+    db.prepare('UPDATE tasks SET creative_id = ? WHERE id = ?').run(to, taskId);
+    db.prepare('UPDATE submissions SET creative_id = ? WHERE task_id = ? AND creative_id = ?').run(to, taskId, from);
+    db.prepare('UPDATE creatives SET author_id = ? WHERE task_id = ? AND author_id = ?').run(to, taskId, from);
+    for (const [tbl, col] of [['ai_expenses', 'user_id'], ['history', 'user_id'], ['comments', 'user_id'], ['files', 'uploaded_by']]) {
+      db.prepare(`UPDATE ${tbl} SET ${col} = ? WHERE task_id = ? AND ${col} = ?`).run(to, taskId, from);
+    }
+  };
+  for (const from of creativeIds) {
+    const excess = active(from).slice(0, Math.max(0, active(from).length - limitOf(from)));
+    for (const { id: taskId } of excess) {
+      const to = creativeIds.find((c) => c !== from && active(c).length < limitOf(c));
+      if (to) { moveTask(taskId, from, to); continue; }
+      db.prepare("UPDATE tasks SET revision_started_at = NULL WHERE id = ? AND status = 'revision'").run(taskId);
+      db.prepare("DELETE FROM history WHERE task_id = ? AND action = 'revision_started' AND id = (SELECT MAX(id) FROM history WHERE task_id = ? AND action = 'revision_started')").run(taskId, taskId);
+    }
+  }
 }
 
 function seedTemplates({ lead, buyers, offerIds, approachIds, iso, now }) {

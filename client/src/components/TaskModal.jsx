@@ -14,6 +14,7 @@ import { Avatar, PriorityBadge, StatusBadge, Modal, Field, useToast } from './ui
 import TaskForm, { BriefPanel } from './TaskForm.jsx';
 import { useNewTask } from '../newTask.jsx';
 import { ParentCreative } from './creative.jsx';
+import { buildSlotMap, slotTarget } from '@shared/slots.js';
 
 export default function TaskModal({ id, meta, users, intent, onClose, onChanged }) {
   const { user } = useAuth();
@@ -485,7 +486,7 @@ function SubmitDialog({ task, meta, onClose, onDone }) {
   const slots = task.slots || [];
   // элементы сдачи в том же порядке, что и на сервере: файлы, затем ссылки
   const items = [...files.map((f) => ({ name: f.name })), ...splitLinks(links).map((l) => ({ name: l }))];
-  const targetOf = (i) => targets[i] ?? (slots[i] ? String(slots[i].slot) : 'new');
+  const targetOf = (i) => slotTarget(slots, targets, i);
   const dupTargets = items.map((_, i) => targetOf(i)).filter((t) => t !== 'new');
   const hasDup = new Set(dupTargets).size !== dupTargets.length;
   const submit = async () => {
@@ -494,13 +495,13 @@ function SubmitDialog({ task, meta, onClose, onDone }) {
     if (hasDup) return toast('Для одного креатива выбрано несколько новых версий', 'error');
     setBusy(true);
     try {
-      const items = exp.filter((r) => r.service && r.credits);
-      if (items.length) await api.post(`/tasks/${task.id}/expenses`, { items });
+      const expenseItems = exp.filter((r) => r.service && r.credits);
+      if (expenseItems.length) await api.post(`/tasks/${task.id}/expenses`, { items: expenseItems });
       const fd = new FormData();
       fd.append('comment', comment);
       fd.append('links', links);
       fd.append('hours_spent', hours);
-      if (slots.length) fd.append('slot_map', JSON.stringify(items.map((_, i) => { const t = targetOf(i); return t === 'new' ? 'new' : Number(t); })));
+      if (slots.length) fd.append('slot_map', JSON.stringify(buildSlotMap(slots, items.length, targets)));
       files.forEach((f) => fd.append('files', f));
       await api.post(`/tasks/${task.id}/submit`, fd);
       onDone();

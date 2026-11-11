@@ -41,7 +41,7 @@ export default function ImportDialog({ onClose, onDone }) {
       </>}>
       <div className="stack">
         <div className="import-hint">
-          <p>Выгрузите отчёт из трекера или рекламного кабинета. Колонки: <code>creative</code> (или <code>креатив</code>, <code>код</code>), <code>date</code>, <code>impressions</code>, <code>clicks</code>, <code>conversions</code>, <code>spend</code>, <code>revenue</code> — допускаются русские названия.</p>
+          <p>Выгрузите отчёт из трекера или рекламного кабинета. Колонки: <code>creative</code> (или <code>креатив</code>, <code>код</code>, <code>объявление</code>, <code>название</code>, <code>ad name</code>, <code>sub_id</code>), <code>date</code>, <code>impressions</code>, <code>clicks</code>, <code>conversions</code>, <code>spend</code>, <code>revenue</code> — допускаются русские названия.</p>
           <p className="muted small">Код креатива ищется прямо в названии объявления: <code>BR_nutra_CD-142_v2</code> → CD-142. Разделитель «,» или «;», даты <code>2026-01-15</code> или <code>15.01.2026</code>, дробные — через запятую или точку. Строки одного креатива за один день суммируются, повторный импорт обновляет данные.</p>
           <a className="link-btn" href="/api/metrics/template.csv"><Download size={13} /> Скачать шаблон CSV</a>
         </div>
