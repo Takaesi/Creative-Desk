@@ -234,6 +234,26 @@ CREATE TABLE IF NOT EXISTS creative_metrics (
   UNIQUE (creative_id, date)
 );
 
+CREATE TABLE IF NOT EXISTS annotations (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  creative_id INTEGER NOT NULL REFERENCES creatives(id) ON DELETE CASCADE,
+  task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  round       INTEGER NOT NULL,
+  author_id   INTEGER NOT NULL REFERENCES users(id),
+  x           REAL CHECK (x IS NULL OR (x >= 0 AND x <= 1)),
+  y           REAL CHECK (y IS NULL OR (y >= 0 AND y <= 1)),
+  time_sec    REAL CHECK (time_sec IS NULL OR time_sec >= 0),
+  text        TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved')),
+  resolved_by INTEGER REFERENCES users(id),
+  resolved_at TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  CHECK ((x IS NULL) = (y IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_ann_creative ON annotations(creative_id);
+CREATE INDEX IF NOT EXISTS idx_ann_task     ON annotations(task_id, round, status);
+
 CREATE TABLE IF NOT EXISTS creative_plans (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

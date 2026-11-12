@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   X, Play, Send, CheckCircle2, RotateCcw, Pencil, Trash2, UserPlus, Undo2, Link2, FileText, Download,
-  Upload, Coins, Plus, MessageSquare, History, Timer, Paperclip, Copy,
+  Upload, Coins, Plus, MessageSquare, History, Timer, Paperclip, Copy, MapPin,
 } from 'lucide-react';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -15,6 +15,7 @@ import TaskForm, { BriefPanel } from './TaskForm.jsx';
 import { useNewTask } from '../newTask.jsx';
 import { ParentCreative } from './creative.jsx';
 import { buildSlotMap, slotTarget } from '@shared/slots.js';
+import ReviewViewer, { ReviewButton } from './Review.jsx';
 
 export default function TaskModal({ id, meta, users, intent, onClose, onChanged }) {
   const { user } = useAuth();
@@ -24,6 +25,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
   const [error, setError] = useState('');
   const [dialog, setDialog] = useState(intent); // submit | revision | accept | assign | edit
   const [tab, setTab] = useState('comments');
+  const [reviewId, setReviewId] = useState(null); // F7: открыт просмотрщик пинов
 
   const load = useCallback(async () => {
     try { setTask(await api.get(`/tasks/${id}`)); }
@@ -41,6 +43,10 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
 
   const A = new Set(task.actions);
   const dl = deadlineInfo(task);
+  // ставить пины может тот, кто принимает работу (байер-владелец, руководитель), пока задача на проверке
+  const canReview = task.status === 'review' && A.has('revision');
+  const lastRound = task.submissions.length ? task.submissions[task.submissions.length - 1].round : 0;
+  const crProps = (s) => ({ review: canReview && s.round === lastRound, onReview: setReviewId });
 
   return (
     <Modal open onClose={onClose} className="task-modal" width={1120}>
@@ -138,7 +144,7 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
                   </div>
                   {s.comment && <p className="round-text">{s.comment}</p>}
                   {s.hours_spent > 0 && <p className="muted small">Потрачено {fmtNum(s.hours_spent, 1)} ч</p>}
-                  {s.creatives?.length ? <SubmissionCreatives items={s.creatives} /> : <><LinkList text={s.links} /><FileList files={s.files} preview /></>}
+                  {s.creatives?.length ? <SubmissionCreatives items={s.creatives} {...crProps(s)} /> : <><LinkList text={s.links} /><FileList files={s.files} preview /></>}
                 </div>
               ))}
             </div>
@@ -163,9 +169,10 @@ export default function TaskModal({ id, meta, users, intent, onClose, onChanged 
 
       {dialog === 'submit' && <SubmitDialog task={task} onClose={() => setDialog(null)} onDone={() => after('Работа отправлена на проверку')} meta={meta} />}
       {dialog === 'revision' && <RevisionDialog task={task} onClose={() => setDialog(null)} onDone={() => after('Отправлено на правки')} />}
-      {dialog === 'accept' && <AcceptDialog task={task} onClose={() => setDialog(null)} onDone={() => after('Работа принята 🎉')} onRevision={() => setDialog('revision')} />}
+      {dialog === 'accept' && <AcceptDialog task={task} onClose={() => setDialog(null)} onDone={() => after('Работа принята 🎉')} onRevision={() => setDialog('revision')} crProps={crProps} />}
       {dialog === 'assign' && <AssignDialog task={task} users={users} onClose={() => setDialog(null)} onDone={() => after('Исполнитель назначен')} />}
       {dialog === 'edit' && <TaskForm task={task} onClose={() => setDialog(null)} onSaved={() => after('Изменения сохранены')} />}
+      {reviewId && <ReviewViewer creativeId={reviewId} onClose={() => { setReviewId(null); load(); }} onChanged={() => onChanged?.()} />}
     </Modal>
   );
 }
@@ -217,7 +224,7 @@ function FileList({ files, preview }) {
 }
 
 /** Креативы сдачи: превью, код CD-…, версия и переход в библиотеку. */
-function SubmissionCreatives({ items }) {
+function SubmissionCreatives({ items, review = false, onReview }) {
   return (
     <div className="sub-creatives">
       {items.map((c) => (
@@ -229,7 +236,10 @@ function SubmissionCreatives({ items }) {
             <b title={c.title}>{c.title}</b>
             <small><span className="card-id">{c.code}</span> · №{c.slot} v{c.version}{c.status === 'superseded' ? ' · заменён новой версией' : ''}</small>
           </span>
-          <Link to={`/library/${c.id}`} className="link-btn">Открыть в библиотеке</Link>
+          <span className="sub-cr-actions">
+            {onReview && <ReviewButton c={c} review={review && c.status === 'draft'} onOpen={onReview} />}
+            <Link to={`/library/${c.id}`} className="link-btn">В библиотеке</Link>
+          </span>
         </div>
       ))}
     </div>
@@ -451,6 +461,10 @@ function HistoryDetails({ h }) {
     );
   }
   if (h.action === 'creatives_accepted') return <small className="hist-extra">приняты: {d.codes.join(', ')}</small>;
+  if (h.action.startsWith('annotation_')) {
+    return <small className="hist-extra">{h.creative_id ? <Link to={`/library/${h.creative_id}`}>{d.code}</Link> : d.code}{d.time_sec != null ? ` · ${Math.floor(d.time_sec / 60)}:${String(Math.floor(d.time_sec % 60)).padStart(2, '0')}` : ''} · «{d.text}»</small>;
+  }
+  if (h.action === 'revision_requested' && d.pins_text) return <small className="hist-extra">{d.pins_text}</small>;
   if (['metrics_saved', 'metrics_deleted'].includes(h.action)) {
     return <small className="hist-extra">{h.creative_id ? <Link to={`/library/${h.creative_id}`}>{d.code}</Link> : d.code} · {d.date}{d.row ? ` · расход ${fmtNum(d.row.spend, 2)}, доход ${fmtNum(d.row.revenue, 2)}` : ''}</small>;
   }
@@ -575,21 +589,23 @@ function SubmitDialog({ task, meta, onClose, onDone }) {
 function RevisionDialog({ task, onClose, onDone }) {
   const toast = useToast();
   const [comment, setComment] = useState('');
+  const pins = task.open_pins || 0;
   const send = async () => {
     try { await api.post(`/tasks/${task.id}/revision`, { comment }); onDone(); } catch (e) { toast(e.message, 'error'); }
   };
   return (
     <Modal open onClose={onClose} title="Отправить на правки" width={540}
-      footer={<><button className="btn btn-ghost" onClick={onClose}>Отмена</button><button className="btn btn-warn" disabled={!comment.trim()} onClick={send}><RotateCcw size={15} /> Отправить на правки</button></>}>
-      <Field label="Что нужно исправить" required>
-        <textarea className="input" rows={5} value={comment} onChange={(e) => setComment(e.target.value)} autoFocus placeholder="Конкретно: что, где и как поменять" />
+      footer={<><button className="btn btn-ghost" onClick={onClose}>Отмена</button><button className="btn btn-warn" disabled={!comment.trim() && !pins} onClick={send}><RotateCcw size={15} /> Отправить на правки</button></>}>
+      {pins > 0 && <p className="rv-pins-note"><MapPin size={14} /> Открытых замечаний на креативах: <b>{pins}</b>. Они попадут в запись о правках, поэтому комментарий необязателен.</p>}
+      <Field label="Что нужно исправить" required={!pins}>
+        <textarea className="input" rows={5} value={comment} onChange={(e) => setComment(e.target.value)} autoFocus placeholder={pins ? 'Общий комментарий — по желанию' : 'Конкретно: что, где и как поменять'} />
       </Field>
       <p className="muted small">Это будет раунд правок №{task.revision_count + 1}. Время на правках и AI-расходы по нему учитываются отдельно.</p>
     </Modal>
   );
 }
 
-function AcceptDialog({ task, onClose, onDone, onRevision }) {
+function AcceptDialog({ task, onClose, onDone, onRevision, crProps }) {
   const toast = useToast();
   const [comment, setComment] = useState('');
   const last = task.submissions[task.submissions.length - 1];
@@ -603,7 +619,7 @@ function AcceptDialog({ task, onClose, onDone, onRevision }) {
         <div className="round">
           <div className="round-head"><b>Сдача №{last.round}</b><span className="muted small">{last.creative_name} · {fmtDate(last.created_at)}</span></div>
           {last.comment && <p className="round-text">{last.comment}</p>}
-          {last.creatives?.length ? <SubmissionCreatives items={last.creatives} /> : <><LinkList text={last.links} /><FileList files={last.files} preview /></>}
+          {last.creatives?.length ? <SubmissionCreatives items={last.creatives} {...crProps(last)} /> : <><LinkList text={last.links} /><FileList files={last.files} preview /></>}
         </div>
       ) : <p className="muted">Нет сданных материалов</p>}
       <Field label="Комментарий (необязательно)" className="mt">

@@ -646,6 +646,131 @@ try {
     assert.ok(!JSON.stringify((await buyer.get('/queue')).body).includes('"plan"'));
   });
 
+  // ---------- F7: пометки на креативе ----------
+  const cr3 = await as('creative3@demo.ru');
+  const reviewTask = async (files) => {
+    const tid = await newTask({ quantity: files.length });
+    assert.equal((await lead.post(`/tasks/${tid}/assign`, { creative_id: 8 })).status, 200);
+    const fd = new FormData();
+    files.forEach(([name, type]) => fd.append('files', new Blob([new Uint8Array([0, 1, 2, 3])], { type }), name));
+    fd.append('hours_spent', '1');
+    assert.equal((await cr.post(`/tasks/${tid}/submit`, fd)).status, 200);
+    return { tid, list: await crsOf(tid) };
+  };
+  let pinTask;
+  await step('F7: пин на картинке хранится в долях 0..1; на видео — со временем; к ссылке — только общий', async () => {
+    pinTask = await reviewTask([['a.png', 'image/png'], ['b.mp4', 'video/mp4']]);
+    const [img, vid] = pinTask.list;
+    assert.equal(img.preview_kind, 'image');
+    assert.equal(vid.preview_kind, 'video');
+    let r = await buyer.post(`/creatives/${img.id}/annotations`, { x: 0.25, y: 0.75, text: 'Логотип крупнее' });
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.deepEqual([r.body.x, r.body.y, r.body.round, r.body.status], [0.25, 0.75, 1, 'open']);
+    assert.equal((await buyer.post(`/creatives/${img.id}/annotations`, { x: 1.2, y: 0.5, text: 'x' })).status, 400, 'координата вне 0..1');
+    assert.equal((await buyer.post(`/creatives/${img.id}/annotations`, { x: 0.5, text: 'x' })).status, 400, 'нужны обе координаты');
+    assert.equal((await buyer.post(`/creatives/${img.id}/annotations`, { x: 0.5, y: 0.5, text: '  ' })).status, 400, 'пустой текст');
+    assert.equal((await buyer.post(`/creatives/${img.id}/annotations`, { x: 0.5, y: 0.5, time_sec: 3, text: 'x' })).status, 400, 'время только для видео');
+    r = await buyer.post(`/creatives/${vid.id}/annotations`, { x: 0.5, y: 0.4, time_sec: 7.2, text: 'На 7-й секунде убрать плашку' });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.time_sec, 7.2);
+    assert.equal((await lead.post(`/creatives/${vid.id}/annotations`, { text: 'Общее: музыка тише' })).status, 201, 'общее замечание без координат');
+    // ссылка — только общие замечания
+    const lt = await newTask({ quantity: 1 });
+    await lead.post(`/tasks/${lt}/assign`, { creative_id: 8 });
+    await submit(cr, lt, { links: 'https://drive.google.com/x' });
+    const link = (await crsOf(lt))[0];
+    assert.equal((await buyer.post(`/creatives/${link.id}/annotations`, { x: 0.1, y: 0.1, text: 'x' })).status, 400);
+    assert.equal((await buyer.post(`/creatives/${link.id}/annotations`, { text: 'Ссылка не открывается' })).status, 201);
+    await buyer.post(`/tasks/${lt}/accept`);
+  });
+  await step('F7: креативщик не создаёт пины (403); чужой байер — 403; после проверки — 409', async () => {
+    const [img] = pinTask.list;
+    assert.equal((await cr.post(`/creatives/${img.id}/annotations`, { x: 0.1, y: 0.1, text: 'сам себе' })).status, 403);
+    assert.equal((await buyer2.post(`/creatives/${img.id}/annotations`, { x: 0.1, y: 0.1, text: 'чужой' })).status, 403);
+    const g = (await cr.get(`/creatives/${img.id}/annotations`)).body;
+    assert.equal(g.can.create, false);
+    assert.equal(g.items.length, 1);
+    assert.equal((await buyer.get(`/creatives/${img.id}/annotations`)).body.can.create, true);
+  });
+  await step('F7: счётчик открытых пинов — на карточке задачи и в задаче', async () => {
+    const t = (await buyer.get('/tasks')).body.find((x) => x.id === pinTask.tid);
+    assert.equal(t.open_pins, 3);
+    const d = (await buyer.get(`/tasks/${pinTask.tid}`)).body;
+    assert.deepEqual(d.submissions[0].creatives.map((c) => c.pins_open), [1, 2]);
+  });
+  await step('F7: «На правки» без комментария, но с открытым пином → 200; без комментария и без пинов → 400', async () => {
+    const r = await buyer.post(`/tasks/${pinTask.tid}/revision`, {});
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const d = (await buyer.get(`/tasks/${pinTask.tid}`)).body;
+    const rc = d.comments.filter((c) => c.kind === 'revision').pop();
+    const [img, vid] = pinTask.list;
+    assert.equal(rc.text, `Замечания: 1 на ${img.code}, 2 на ${vid.code}`);
+    // без пинов и без комментария
+    const empty = await reviewTask([['c.png', 'image/png']]);
+    const e = await buyer.post(`/tasks/${empty.tid}/revision`, { comment: '' });
+    assert.equal(e.status, 400);
+    assert.equal((await buyer.post(`/tasks/${empty.tid}/revision`, { comment: 'Фон темнее' })).status, 200);
+    // пины нельзя ставить, когда задача уже не на проверке
+    assert.equal((await buyer.post(`/creatives/${img.id}/annotations`, { x: 0.3, y: 0.3, text: 'поздно' })).status, 409);
+  });
+  await step('F7: креативщик-исполнитель отмечает «Исправлено», чужой креативщик — нет; байер возвращает в open', async () => {
+    const [img, vid] = pinTask.list;
+    const pins = (await cr.get(`/creatives/${vid.id}/annotations`)).body.items;
+    const p = pins[0];
+    assert.equal((await cr3.patch(`/annotations/${p.id}`, { status: 'resolved' })).status, 403, 'не исполнитель');
+    let r = await cr.patch(`/annotations/${p.id}`, { status: 'resolved' });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.status, 'resolved');
+    assert.equal((await cr.patch(`/annotations/${p.id}`, { status: 'open' })).status, 403, 'креативщик не переоткрывает');
+    assert.equal((await cr.patch(`/annotations/${p.id}`, { text: 'другой текст' })).status, 403, 'текст меняет только автор');
+    r = await buyer.patch(`/annotations/${p.id}`, { status: 'open' });
+    assert.equal(r.body.status, 'open');
+    await cr.patch(`/annotations/${p.id}`, { status: 'resolved' });
+    assert.equal((await buyer.del(`/annotations/${p.id}`)).status, 409, 'удалять можно только пока задача на проверке');
+    const t = (await cr.get('/tasks')).body.find((x) => x.id === pinTask.tid);
+    assert.equal(t.open_pins, 2, 'исправленный пин не считается открытым');
+    // в очереди креативщика — счётчик на задаче в «Мои задачи и правки»
+    const q = (await qBlock(cr, 'my_tasks', true)).items.find((x) => x.id === pinTask.tid);
+    assert.equal(q.open_pins, 2);
+    void img;
+  });
+  await step('F7: новая версия получает пины прошлой версии; на перекрытой версии пинов «текущего раунда» нет', async () => {
+    const [img, vid] = pinTask.list;
+    await cr.post(`/tasks/${pinTask.tid}/take`);
+    const fd = new FormData();
+    fd.append('files', new Blob([new Uint8Array([9, 9])], { type: 'video/mp4' }), 'b2.mp4');
+    fd.append('hours_spent', '1');
+    fd.append('slot_map', JSON.stringify(buildSlotMap([{ slot: 1 }, { slot: 2 }], 1, { 0: '2' })));
+    assert.equal((await cr.post(`/tasks/${pinTask.tid}/submit`, fd)).status, 200);
+    const v2 = (await crsOf(pinTask.tid)).find((c) => c.slot === 2 && c.version === 2);
+    const g = (await buyer.get(`/creatives/${v2.id}/annotations`)).body;
+    assert.equal(g.items.length, 0);
+    assert.equal(g.previous.creative.id, vid.id);
+    assert.equal(g.previous.items.length, 2);
+    assert.ok(g.previous.items.some((a) => a.time_sec === 7.2));
+    assert.equal(g.can.create, true);
+    assert.equal((await buyer.get(`/creatives/${vid.id}/annotations`)).body.can.create, false, 'на заменённую версию пины не ставятся');
+    // открытый пин на слоте 1 (не переделан) остаётся текущим; пины v1 слота 2 — нет
+    assert.equal((await buyer.get('/tasks')).body.find((x) => x.id === pinTask.tid).open_pins, 1);
+    // байер удаляет свой пин, пока задача на проверке; чужой пин — нет
+    const mine = (await buyer.get(`/creatives/${img.id}/annotations`)).body.items[0];
+    assert.equal((await lead.del(`/annotations/${mine.id}`)).status, 403);
+    assert.equal((await buyer.del(`/annotations/${mine.id}`)).status, 200);
+    assert.equal((await buyer.post(`/tasks/${pinTask.tid}/accept`)).status, 200);
+  });
+
+  await step('F7: файлы отдаются с поддержкой Range (перемотка видео) и с прежними заголовками безопасности', async () => {
+    const { token } = await (await fetch(`${BASE}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'lead@demo.ru', password: 'demo123' }) })).json();
+    const vid = pinTask.list[1];
+    const r = await fetch(`${BASE}/files/${vid.file_id}`, { headers: { Authorization: `Bearer ${token}`, Range: 'bytes=1-2' } });
+    assert.equal(r.status, 206);
+    assert.equal(r.headers.get('content-range'), 'bytes 1-2/4');
+    assert.equal(r.headers.get('content-type'), 'video/mp4');
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(r.headers.get('content-security-policy'), /sandbox/);
+    assert.deepEqual([...new Uint8Array(await r.arrayBuffer())], [1, 2]);
+  });
+
   // ---------- F6: шаблоны и качество ТЗ ----------
   await step('F6: шаблон с deadline_hours = 48 даёт дедлайн «сейчас + 48 ч»', async () => {
     const t = (await buyer.post('/templates', { name: 'Мой UGC', creative_type: 'UGC', quantity: 2, deadline_hours: 48, hook: 'Отзыв' })).body;

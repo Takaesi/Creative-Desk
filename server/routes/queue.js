@@ -7,6 +7,7 @@ import { wrap, auth } from '../http.js';
 import { queryCreatives, needResultsWhere, METRICS_CTE } from './creatives.js';
 import { wipInfo, teamLoad } from '../workload.js';
 import { planFor, planForAll } from '../plans.js';
+import { OPEN_PINS_SQL } from './annotations.js';
 
 const router = Router();
 const H = 3600_000;
@@ -14,7 +15,8 @@ const DAY = 24 * H;
 const LIMIT = 7;
 const PRIORITY_ORDER = "CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END";
 
-const TASK_SQL = `SELECT t.*, b.name AS buyer_name, b.color AS buyer_color, c.name AS creative_name, c.color AS creative_color
+const TASK_SQL = `SELECT t.*, b.name AS buyer_name, b.color AS buyer_color, c.name AS creative_name, c.color AS creative_color,
+  ${OPEN_PINS_SQL} AS open_pins
   FROM tasks t JOIN users b ON b.id = t.buyer_id LEFT JOIN users c ON c.id = t.creative_id`;
 
 const iso = (ms) => new Date(ms).toISOString();

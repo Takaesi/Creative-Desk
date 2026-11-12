@@ -41,12 +41,19 @@ export const ACTION_LABEL = {
   references_added: 'добавил(а) референсы',
   dictionary_changed: 'изменил(а) справочник',
   creative_status: 'сменил(а) статус креатива',
+  creative_created: 'создан креатив',
+  creatives_accepted: 'приняты креативы',
   creative_edited: 'изменил(а) креатив',
   metrics_saved: 'внёс(ла) результаты',
   metrics_deleted: 'удалил(а) результаты за день',
   metrics_imported: 'импортировал(а) результаты из CSV',
   template_changed: 'изменил(а) шаблон ТЗ',
   plan_changed: 'изменил(а) план креативщика',
+  annotation_added: 'оставил(а) замечание на креативе',
+  annotation_edited: 'изменил(а) замечание',
+  annotation_resolved: 'отметил(а) замечание исправленным',
+  annotation_reopened: 'вернул(а) замечание в работу',
+  annotation_deleted: 'удалил(а) замечание',
 };
 
 export const FIELD_LABEL = {

@@ -12,6 +12,7 @@ import templatesRouter from './routes/templates.js';
 import queueRouter from './routes/queue.js';
 import { HttpError, wrap, auth, requireRole, upload, fixName, publicUser, idOrNull } from './http.js';
 import plansRouter from './routes/plans.js';
+import annotationsRouter, { openPins, OPEN_PINS_SQL } from './routes/annotations.js';
 import dictionariesRouter, { findOffer, findApproach } from './routes/dictionaries.js';
 import creativesRouter, { getCreativeRow, shapeCreative } from './routes/creatives.js';
 import { submissionItems, createCreativesForSubmission, acceptTaskCreatives, migrateLegacyCreatives, code } from './creatives.js';
@@ -60,7 +61,8 @@ const TASK_LIST_SQL = `
     ap.name AS approach_name,
     (SELECT COALESCE(SUM(credits),0) FROM ai_expenses e WHERE e.task_id = t.id) AS credits_total,
     (SELECT COUNT(*) FROM files f WHERE f.task_id = t.id AND f.kind='reference') AS ref_count,
-    (SELECT COUNT(*) FROM comments m WHERE m.task_id = t.id) AS comment_count
+    (SELECT COUNT(*) FROM comments m WHERE m.task_id = t.id) AS comment_count,
+    ${OPEN_PINS_SQL} AS open_pins
   FROM tasks t
   JOIN users b ON b.id = t.buyer_id
   LEFT JOIN users c ON c.id = t.creative_id
@@ -199,6 +201,7 @@ app.get('/api/users', auth, (req, res) => {
 
 app.use('/api', dictionariesRouter);
 app.use('/api', plansRouter);
+app.use('/api', annotationsRouter);
 app.use('/api', creativesRouter);
 app.use('/api', templatesRouter);
 app.use('/api', queueRouter);
@@ -268,7 +271,9 @@ app.get('/api/tasks/:id', auth, wrap((req, res) => {
   ).all(task.id).map((h) => ({ ...h, details: h.details ? JSON.parse(h.details) : null }));
   const files = db.prepare('SELECT f.*, u.name AS uploader FROM files f JOIN users u ON u.id = f.uploaded_by WHERE f.task_id = ? ORDER BY f.id').all(task.id);
   const creatives = db.prepare(
-    `SELECT c.id, c.submission_id, c.file_id, c.link, c.title, c.slot, c.version, c.status, f.mime AS file_mime
+    `SELECT c.id, c.submission_id, c.file_id, c.link, c.title, c.slot, c.version, c.status, f.mime AS file_mime,
+       (SELECT COUNT(*) FROM annotations a WHERE a.creative_id = c.id) AS pins_total,
+       (SELECT COUNT(*) FROM annotations a WHERE a.creative_id = c.id AND a.status = 'open') AS pins_open
      FROM creatives c LEFT JOIN files f ON f.id = c.file_id WHERE c.task_id = ? ORDER BY c.slot, c.version`
   ).all(task.id).map((c) => ({ ...c, code: code(c.id) }));
   const submissions = db.prepare(
@@ -411,13 +416,17 @@ app.post('/api/tasks/:id/accept', auth, wrap((req, res) => {
 
 app.post('/api/tasks/:id/revision', auth, wrap((req, res) => {
   const comment = String(req.body?.comment || '').trim().slice(0, 5000);
-  if (!comment) throw new HttpError(400, 'Опишите, что нужно поправить');
   db.transaction(() => {
     const task = getTask(req.params.id);
     ensureAction(task, req.user, 'revision');
+    // F7: комментарий необязателен, если на креативах есть открытые замечания текущего раунда
+    const pins = openPins(task.id);
+    if (!comment && !pins.count) throw new HttpError(400, 'Опишите, что нужно поправить, или поставьте замечания на креативах');
     const at = nowIso();
-    db.prepare("INSERT INTO comments (task_id, user_id, text, kind, created_at) VALUES (?,?,?,'revision',?)").run(task.id, req.user.id, comment, at);
-    transition(task, req.user, 'revision', { revision_count: task.revision_count + 1, revision_started_at: null }, 'revision_requested', { round: task.revision_count + 1 });
+    const text = [comment, pins.text].filter(Boolean).join('\n');
+    db.prepare("INSERT INTO comments (task_id, user_id, text, kind, created_at) VALUES (?,?,?,'revision',?)").run(task.id, req.user.id, text, at);
+    transition(task, req.user, 'revision', { revision_count: task.revision_count + 1, revision_started_at: null }, 'revision_requested',
+      { round: task.revision_count + 1, pins: pins.count || undefined, pins_text: pins.text || undefined });
   })();
   res.json({ ok: true });
 }));
@@ -506,7 +515,8 @@ app.get('/api/files/:id', auth, wrap((req, res) => {
   res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox");
   const disp = req.query.download ? 'attachment' : 'inline';
   res.setHeader('Content-Disposition', `${disp}; filename*=UTF-8''${encodeURIComponent(f.original_name)}`);
-  fs.createReadStream(p).pipe(res);
+  // sendFile отвечает на Range-запросы (206): без этого браузер не перематывает видео в плеере ревью
+  res.sendFile(path.resolve(p), { dotfiles: 'allow', cacheControl: false }, (err) => { if (err && !res.headersSent) res.status(err.status || 500).end(); });
 }));
 
 // ---------- activity & analytics ----------

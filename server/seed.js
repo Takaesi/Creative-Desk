@@ -303,7 +303,29 @@ export function seed() {
     seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit, lead });
     seedTemplates({ lead, buyers, offerIds, approachIds, iso, now });
     seedPlans(now);
+    seedAnnotations(now);
   })();
+}
+
+/** F7: на задаче в правках — замечания байера прямо на картинке (одно уже исправлено), чтобы демо показывало пины. */
+function seedAnnotations(now) {
+  const t = db.prepare(`SELECT t.* FROM tasks t WHERE t.status = 'revision' AND EXISTS (
+      SELECT 1 FROM creatives c JOIN files f ON f.id = c.file_id WHERE c.task_id = t.id AND c.status = 'draft' AND f.mime LIKE 'image/%')
+    ORDER BY t.id LIMIT 1`).get();
+  if (!t) return;
+  const crs = db.prepare(`SELECT c.* FROM creatives c JOIN files f ON f.id = c.file_id WHERE c.task_id = ? AND c.status = 'draft' AND f.mime LIKE 'image/%'
+    AND c.version = (SELECT MAX(c2.version) FROM creatives c2 WHERE c2.task_id = c.task_id AND c2.slot = c.slot) ORDER BY c.slot LIMIT 2`).all(t.id);
+  const at = new Date(Math.min(now, Date.parse(t.updated_at))).toISOString();
+  const ins = db.prepare(`INSERT INTO annotations (creative_id, task_id, round, author_id, x, y, text, status, resolved_by, resolved_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const notes = [
+    [0.5, 0.18, 'Заголовок крупнее и контрастнее — сейчас теряется на фоне', 'open'],
+    [0.78, 0.86, 'Кнопку CTA сдвинуть выше, её режет интерфейс площадки', 'open'],
+    [null, null, 'Цвета в целом ок, оставляем', 'resolved'],
+  ];
+  crs.forEach((c, i) => notes.slice(i === 0 ? 0 : 1, i === 0 ? 3 : 2).forEach(([x, y, text, status]) => {
+    ins.run(c.id, t.id, c.version, t.buyer_id, x, y, text, status, status === 'resolved' ? t.creative_id : null, status === 'resolved' ? at : null, at, at);
+  }));
 }
 
 /**

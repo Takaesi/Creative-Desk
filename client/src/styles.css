@@ -808,3 +808,64 @@ a.q-tile:hover { text-decoration: none; border-color: var(--accent); }
 .plan-fact .period { display: inline-flex; gap: 6px; align-items: center; }
 .pf-pct { color: inherit; opacity: .8; }
 td.pos, td.neg { font-weight: 600; }
+
+/* F7: ревью с пинами */
+.rv-backdrop { position: fixed; inset: 0; z-index: 80; background: var(--bg); display: flex; flex-direction: column; animation: fade .15s; }
+.rv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.rv-head h3 { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.rv-body { flex: 1; min-height: 0; overflow: auto; }
+.rv-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 100%; }
+.rv-stage { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 16px; background: #14161c; min-width: 0; }
+.rv-hint { color: #aab0bd; margin: 0; text-align: center; }
+.rv-frame { position: relative; display: inline-block; line-height: 0; max-width: 100%; user-select: none; }
+.rv-frame img, .rv-frame video { display: block; max-width: 100%; max-height: calc(100vh - 170px); width: auto; height: auto; border-radius: 6px; background: #000; }
+.rv-frame.can-pin { cursor: crosshair; }
+.pin { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff; background: var(--accent); color: #fff;
+  font: 700 12px/22px var(--font, inherit); text-align: center; padding: 0; box-shadow: 0 2px 8px rgba(0,0,0,.45); cursor: pointer; z-index: 2; }
+.pin.pin-done { background: var(--success); }
+.pin.pin-prev { opacity: .5; background: #6b7280; border-style: dashed; z-index: 1; }
+.pin.pin-new { background: #f59e0b; animation: pop .18s ease-out; pointer-events: none; }
+.pin.sel { outline: 3px solid #f59e0b; outline-offset: 2px; z-index: 3; opacity: 1; }
+.rv-video { display: flex; flex-direction: column; gap: 8px; max-width: 100%; align-items: center; }
+.rv-controls { display: flex; align-items: center; gap: 10px; width: min(720px, 100%); color: #e5e7eb; }
+.rv-controls .icon-btn { color: #e5e7eb; }
+.rv-bar { position: relative; flex: 1; height: 8px; border-radius: 4px; background: rgba(255,255,255,.18); cursor: pointer; }
+.rv-bar-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 4px; pointer-events: none; }
+.rv-mark { position: absolute; top: 50%; width: 12px; height: 12px; transform: translate(-50%, -50%); border-radius: 50%; background: #f59e0b; border: 2px solid #14161c; padding: 0; cursor: pointer; }
+.rv-mark.prev { background: #9ca3af; opacity: .7; }
+.rv-mark.sel { box-shadow: 0 0 0 3px rgba(245, 158, 11, .5); }
+.rv-clock { font-variant-numeric: tabular-nums; font-size: 12.5px; min-width: 76px; text-align: right; }
+.rv-link { display: flex; flex-direction: column; align-items: center; gap: 10px; color: #e5e7eb; padding: 40px 16px; text-align: center; }
+.rv-link a { color: #c7d2fe; word-break: break-all; }
+.rv-side { border-left: 1px solid var(--border); background: var(--surface); padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.rv-side-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.rv-side-head .count { background: var(--surface-3); color: var(--text-2); font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px; }
+.rv-side-head .count-on { background: var(--accent-soft); color: var(--accent); }
+.rv-general { margin-left: auto; }
+.rv-new { border: 1px solid #f59e0b; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: color-mix(in srgb, #f59e0b 8%, var(--surface)); }
+.rv-new-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.rv-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rv-item { border: 1px solid var(--border); border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.rv-item.sel { border-color: #f59e0b; box-shadow: 0 0 0 2px color-mix(in srgb, #f59e0b 25%, transparent); }
+.rv-item.done .rv-item-text > span { text-decoration: line-through; color: var(--text-2); }
+.rv-item.prev { opacity: .75; }
+.rv-item-main { display: flex; gap: 8px; align-items: flex-start; text-align: left; background: none; border: 0; padding: 0; color: inherit; cursor: pointer; width: 100%; }
+.rv-item-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.rv-item-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+.pin-num { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 11.5px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.rv-item.done .pin-num { background: var(--success); }
+.rv-item.prev .pin-num { background: #9ca3af; }
+.pin-num.pin-general { background: var(--surface-3); color: var(--text-2); }
+.rv-time { color: var(--accent); }
+.rv-open { background: var(--warn-soft); color: var(--warn); flex-shrink: 0; }
+.rv-ok { background: color-mix(in srgb, var(--success) 15%, var(--surface)); color: var(--success); flex-shrink: 0; }
+.rv-prev-head { font-weight: 600; font-size: 13px; margin-top: 6px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.rv-pins-note { display: flex; gap: 6px; align-items: center; background: var(--accent-soft); color: var(--text); border-radius: 9px; padding: 8px 10px; font-size: 13px; margin: 0 0 12px; }
+.btn-xs { height: 24px; padding: 0 8px; font-size: 12px; border-radius: 7px; gap: 4px; }
+.sub-cr-actions { display: inline-flex; gap: 8px; align-items: center; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.card-pins { color: var(--accent); font-weight: 600; }
+@media (max-width: 860px) {
+  .rv-layout { grid-template-columns: minmax(0, 1fr); }
+  .rv-side { border-left: 0; border-top: 1px solid var(--border); }
+  .rv-frame img, .rv-frame video { max-height: 60vh; }
+}

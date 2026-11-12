@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, Copy, Download, Rocket, Trophy, Minus, ThumbsDown, Flame, Archive, ArchiveRestore, Sparkles, Pencil, Check, X,
-  GitBranch, History, Wallet, Tag,
+  GitBranch, History, Wallet, Tag, MapPin,
 } from 'lucide-react';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -12,6 +12,7 @@ import { Avatar, Empty, useToast } from '../components/ui.jsx';
 import { CreativePreview, CreativeStatusBadge, CreativeMini } from '../components/creative.jsx';
 import { HistoryList } from '../components/TaskModal.jsx';
 import Results from '../components/Results.jsx';
+import ReviewViewer from '../components/Review.jsx';
 import { useNewTask } from '../newTask.jsx';
 
 const ACTIONS = [
@@ -30,6 +31,7 @@ export default function CreativePage() {
   const { openVariations } = useNewTask();
   const [d, setD] = useState(null);
   const [error, setError] = useState('');
+  const [reviewing, setReviewing] = useState(false);
 
   const load = useCallback(() => api.get(`/creatives/${creativeId}`).then(setD).catch((e) => setError(e.message)), [creativeId]);
   useEffect(() => { setD(null); setError(''); load(); }, [load]);
@@ -105,6 +107,7 @@ export default function CreativePage() {
               <span className="spacer" />
               {A.has('archive') && <button className="btn btn-sm btn-ghost" onClick={() => setStatus('archived', 'Отправлен в архив')} title="В архив"><Archive size={14} /> В архив</button>}
               {A.has('restore') && <button className="btn btn-sm btn-ghost" onClick={() => setStatus('restore', 'Возвращён из архива')}><ArchiveRestore size={14} /> Вернуть из архива</button>}
+              <button className="btn btn-sm btn-ghost" onClick={() => setReviewing(true)}><MapPin size={14} /> {c.task_status === 'review' && c.status === 'draft' && A.has('edit') ? 'Ревью' : 'Замечания'}</button>
               {c.file_id && <a className="btn btn-sm btn-ghost" href={`/api/files/${c.file_id}?download=1`}><Download size={14} /> Скачать</a>}
             </div>
           </section>
@@ -137,6 +140,7 @@ export default function CreativePage() {
           </section>
         </div>
       </div>
+      {reviewing && <ReviewViewer creativeId={c.id} onClose={() => { setReviewing(false); load(); }} />}
     </div>
   );
 }

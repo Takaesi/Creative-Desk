@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { Plus, Search, Coins, MessageSquare, RotateCcw, Paperclip, Clock, ArrowRight, Inbox, RefreshCw } from 'lucide-react';
+import { Plus, Search, Coins, MessageSquare, MapPin, RotateCcw, Paperclip, Clock, ArrowRight, Inbox, RefreshCw } from 'lucide-react';
 import { api, qs } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { STATUS, STATUS_ORDER, PRIORITY, deadlineInfo, fmtNum, relTime } from '../utils.js';
@@ -247,6 +247,7 @@ function TaskCard({ task: t, user, onOpen, onQuick, onIntent, onDragStart }) {
         </div>
         <div className="card-stats">
           {t.ref_count > 0 && <span title="Файлы-референсы"><Paperclip size={12} />{t.ref_count}</span>}
+          {t.open_pins > 0 && <span className="card-pins" title="Открытые замечания на креативах"><MapPin size={12} />{t.open_pins}</span>}
           {t.comment_count > 0 && <span title="Комментарии"><MessageSquare size={12} />{t.comment_count}</span>}
           {t.credits_total > 0 && <span title="AI-кредиты"><Coins size={12} />{fmtNum(t.credits_total)}</span>}
         </div>
