@@ -4,11 +4,11 @@ import bcrypt from 'bcryptjs';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, UPLOAD_DIR, SETTINGS_SCHEMA, getSettings } from './db.js';
+import { db, UPLOAD_DIR, SETTINGS_SCHEMA, getSettings, logHistory } from './db.js';
 import { defaultUnits, scoreBrief } from './domain.js';
 import { createCreativesForSubmission, acceptTaskCreatives, latestSlots, refreshCreativeAfterMetrics, setCreativeStatus } from './creatives.js';
 import { computeMetrics } from './metrics.js';
-import { moscowMonth, shiftMonth, factFor, elapsedDays, daysInMonth } from './plans.js';
+import { moscowMonth, shiftMonth, factFor, elapsedDays, daysInMonth, planPace, monthBounds } from './plans.js';
 
 const H = 3600_000;
 const DEMO_PASSWORD = 'demo123';
@@ -301,10 +301,43 @@ export function seed() {
 
     enforceWipLimits(creatives);
     seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit, lead });
+    topUpResults({ rand, between, iso, now });
     seedTemplates({ lead, buyers, offerIds, approachIds, iso, now });
     seedPlans(now);
     seedAnnotations(now);
   })();
+}
+
+/**
+ * Дозаполнение результатов: у каждого байера в «Без результатов» остаётся 3–5 креативов, а не два десятка.
+ * Остальным принятым без метрик добавляем статистику по вчерашний день, «застоявшимся» в тесте — продлеваем её до вчера.
+ * Если система после этого предлагает вердикт — байер его подтверждает (иначе разрастётся «Ждут вердикта»).
+ */
+function topUpResults({ rand, between, iso, now }) {
+  const { settings, genDays, after, get } = metricsTools({ rand, between, iso, now });
+  const accCut = iso(now - settings.no_results_reminder_days * DAY);
+  const staleDay = iso(now - 3 * DAY).slice(0, 10);
+  const need = db.prepare(`SELECT c.*, (SELECT MAX(date) FROM creative_metrics m WHERE m.creative_id = c.id) AS last_date
+    FROM creatives c WHERE c.buyer_id = ? AND (
+      (c.status = 'accepted' AND c.accepted_at < ? AND NOT EXISTS (SELECT 1 FROM creative_metrics m WHERE m.creative_id = c.id))
+      OR (c.status = 'in_test' AND (SELECT MAX(date) FROM creative_metrics m WHERE m.creative_id = c.id) <= ?))
+    ORDER BY c.accepted_at DESC, c.id DESC`);
+  for (const { id } of db.prepare("SELECT id FROM users WHERE role = 'buyer' ORDER BY id").all()) {
+    const list = need.all(id, accCut, staleDay);
+    const keep = 3 + Math.floor(rand() * 3); // 3–5
+    for (const c of list.slice(keep)) {
+      const hadSuggestion = !!c.suggested_verdict;
+      const start = c.last_date ? Date.parse(c.last_date) + DAY : Math.max(Date.parse(c.accepted_at) + DAY, now - Math.round(between(8, 16)) * DAY);
+      const n = Math.max(1, Math.floor((now - DAY / 2 - start) / DAY) + 1);
+      const r = rand();
+      const last = genDays(c, start, n, r < 0.2 ? between(35, 110) : r < 0.65 ? between(3, 26) : between(-70, -8));
+      const at = after(c, last);
+      const fresh = get(c.id);
+      if (!hadSuggestion && fresh.status === 'in_test' && fresh.suggested_verdict) {
+        setCreativeStatus(fresh, fresh.suggested_verdict, { userId: c.buyer_id, at, extra: { suggested: fresh.suggested_verdict } });
+      }
+    }
+  }
 }
 
 /** F7: на задаче в правках — замечания байера прямо на картинке (одно уже исправлено), чтобы демо показывало пины. */
@@ -329,29 +362,75 @@ function seedAnnotations(now) {
 }
 
 /**
- * Нормы 30–45 в месяц. Факт к сегодняшнему дню зависит от даты запуска, поэтому норму подбираем под темп:
- * у креативщика с наименьшим фактом — отставание, у остальных — «в графике» или «опережает».
- * Прошлый месяц сохраняется отдельной записью — видно историю в аналитике.
+ * Нормы подбираются под реальный темп каждого креативщика в демо (факт к сегодняшнему дню зависит от даты запуска):
+ * в текущем месяце все «в графике» или «опережают», кроме одного — у него лёгкое отставание.
+ * Прошлый месяц — отдельной записью: большинство выполнили план, один чуть не дотянул.
  */
 function seedPlans(now) {
   const month = moscowMonth(now);
   const prev = shiftMonth(month, -1);
   const at = new Date(now).toISOString();
   const ins = db.prepare('INSERT INTO creative_plans (user_id, month, norm, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
+  const rate30 = db.prepare(`SELECT COUNT(*) c FROM creatives WHERE author_id = ? AND accepted_at >= ? AND status NOT IN ('superseded','draft')`);
+  const elapsed = elapsedDays(month, now);
+  const since30 = new Date(now - 30 * DAY).toISOString();
+  // отстающий — у кого факт месяца ниже всего относительно его обычного темпа (выбираем до любых правок данных)
+  const lagger = db.prepare("SELECT id FROM users WHERE role = 'creative' ORDER BY id").all()
+    .map((u) => ({ id: u.id, k: factFor(u.id, month) / Math.max(1, rate30.get(u.id, since30).c) }))
+    .sort((a, b) => a.k - b.k)[0].id;
+  // в первые дни месяца у кого-то может не быть ни одного принятого креатива — тогда «в графике» не бывает.
+  // Переносим в этот месяц приёмку одной недавней задачи (закрыта ≤ 14 дней назад; статистика креативов, если есть, — не раньше новой даты).
+  if (elapsed > 0) {
+    const [monthStart] = monthBounds(month);
+    const newAt = new Date(Math.min(now - H, Date.parse(monthStart) + 6 * H)).toISOString();
+    for (const { id } of db.prepare("SELECT id FROM users WHERE role = 'creative'").all()) {
+      if ((id === lagger && elapsed < 4) || factFor(id, month) > 0) continue;
+      const t = db.prepare(`SELECT t.id FROM tasks t WHERE t.creative_id = ? AND t.status = 'done' AND t.completed_at >= ? AND t.completed_at < ?
+          AND t.submitted_at < ? AND NOT EXISTS (SELECT 1 FROM creatives c WHERE c.task_id = t.id AND (c.launched_at < ? OR c.verdict_at < ?))
+          AND NOT EXISTS (SELECT 1 FROM creative_metrics m JOIN creatives c ON c.id = m.creative_id WHERE c.task_id = t.id AND m.date <= ?)
+        ORDER BY t.completed_at DESC LIMIT 1`).get(id, new Date(now - 14 * DAY).toISOString(), monthStart, newAt, newAt, newAt, newAt.slice(0, 10));
+      if (!t) {
+        // нечего переносить — байер принимает его работу, которая лежит на проверке (обычная приёмка)
+        const r = db.prepare("SELECT * FROM tasks WHERE creative_id = ? AND status = 'review' AND submitted_at < ? ORDER BY submitted_at LIMIT 1").get(id, new Date(now - 2 * H).toISOString());
+        if (!r) continue;
+        const accAt = new Date(Math.min(now - H, Math.max(Date.parse(r.submitted_at) + H, Date.parse(monthStart) + 6 * H))).toISOString();
+        db.prepare("UPDATE tasks SET status = 'done', completed_at = ?, updated_at = ? WHERE id = ?").run(accAt, accAt, r.id);
+        logHistory({ taskId: r.id, taskTitle: r.title, userId: r.buyer_id, action: 'accepted', from: 'review', to: 'done', at: accAt });
+        acceptTaskCreatives(r, { at: accAt, userId: r.buyer_id });
+        continue;
+      }
+      db.prepare('UPDATE tasks SET completed_at = ?, updated_at = ? WHERE id = ?').run(newAt, newAt, t.id);
+      db.prepare("UPDATE creatives SET accepted_at = ? WHERE task_id = ? AND accepted_at IS NOT NULL").run(newAt, t.id);
+      db.prepare("UPDATE history SET created_at = ? WHERE task_id = ? AND (to_status = 'done' OR action = 'creatives_accepted')").run(newAt, t.id);
+    }
+  }
   const people = db.prepare("SELECT id FROM users WHERE role = 'creative' ORDER BY id").all()
-    .map((u) => ({ id: u.id, fact: factFor(u.id, month), prevFact: factFor(u.id, prev) }))
-    .sort((a, b) => a.fact - b.fact);
-  const share = elapsedDays(month, now) / daysInMonth(month);
-  const clamp = (n) => Math.max(30, Math.min(45, Math.round(n)));
+    .map((u) => ({ id: u.id, fact: factFor(u.id, month), prevFact: factFor(u.id, prev), rate: rate30.get(u.id, since30).c }));
+  const share = elapsed / daysInMonth(month);
+  const status = (norm, fact) => planPace({ norm, fact, month, now }).status;
+  const prevTargets = [1.08, 0.94, 1.02, 0.9]; // факт / норма за прошлый месяц: выполнил или почти выполнил
   people.forEach((p, i) => {
-    // целевое отношение факта к ожидаемому: 0.6 — отстаёт, 0.92 — в графике, 1.15 — опережает
-    const ratio = i === 0 ? 0.6 : i % 2 ? 0.92 : 1.15;
-    const norm = i === 0 ? 45 : clamp(share > 0 ? p.fact / (share * ratio) : 40);
+    // месячный темп: со второй трети месяца — по текущему факту, раньше — по последним 30 дням
+    const monthly = Math.max(1, share >= 0.35 ? p.fact / share : p.rate);
+    let norm = Math.max(1, Math.round(monthly * (p.id === lagger ? 1 : i % 2 ? 1.05 : 0.95)));
+    if (p.id === lagger) {
+      // наименьшая норма, при которой уже «отстаёт» (чуть ниже 85 % ожидаемого), — лёгкое отставание.
+      // При нулевом факте — обычный темп; утром 1-го отстать нельзя: ожидаемо 0.
+      if (elapsed > 0 && p.fact > 0) { norm = 1; while (norm < 10000 && status(norm, p.fact) !== 'behind') norm++; }
+      else norm = Math.max(1, p.rate);
+    } else {
+      while (norm > 1 && status(norm, p.fact) === 'behind') norm--;
+    }
     db.prepare('UPDATE users SET monthly_norm = ?, monthly_norm_from = ? WHERE id = ?').run(norm, month, p.id);
-    ins.run(p.id, prev, clamp(p.prevFact * (i === 0 ? 1.25 : 0.95)), at, at);
+    if (p.prevFact > 0) {
+      const r = p.id === lagger ? 0.82 : prevTargets[i % prevTargets.length];
+      ins.run(p.id, prev, Math.max(1, Math.round(p.prevFact / r)), at, at);
+    }
+    p.norm = norm;
   });
-  // у одного — отдельная норма на следующий месяц (отпуск)
-  ins.run(people[people.length - 1].id, shiftMonth(month, 1), 30, at, at);
+  // у одного — отдельная, сниженная норма на следующий месяц (отпуск)
+  const last = people.find((p) => p.id !== lagger && p.norm > 1);
+  if (last) ins.run(last.id, shiftMonth(month, 1), Math.max(1, Math.round(last.norm * 0.7)), at, at);
 }
 
 /**
@@ -408,7 +487,8 @@ const dayStr = (ms) => new Date(ms).toISOString().slice(0, 10);
  * Результаты тестов: метрики ~60 % принятых креативов, вердикты (у части — только предложение),
  * два выгорающих победителя и одно «семейство» с вариациями.
  */
-function seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit }) {
+/** Генератор дневной статистики креатива и пересчёт статуса после неё — общий для seedResults и дозаполнения. */
+function metricsTools({ rand, between, iso, now }) {
   const settings = getSettings();
   const upsert = db.prepare(`INSERT INTO creative_metrics (creative_id, date, impressions, clicks, conversions, spend, revenue, source, created_by, created_at, updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (creative_id, date) DO UPDATE SET impressions = excluded.impressions, clicks = excluded.clicks,
@@ -440,6 +520,11 @@ function seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit }) 
     return at;
   };
 
+  return { settings, genDays, after, get };
+}
+
+function seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit }) {
+  const { settings, genDays, after, get } = metricsTools({ rand, between, iso, now });
   const accepted = db.prepare("SELECT * FROM creatives WHERE status = 'accepted' AND accepted_at < ? ORDER BY id").all(iso(now - 2 * DAY));
   let pendingLeft = 4; // креативы, у которых только предложение вердикта — для блока «Ждут вердикта»
   const tested = [];

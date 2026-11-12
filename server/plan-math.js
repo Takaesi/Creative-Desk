@@ -25,12 +25,15 @@ export function shiftMonth(month, n) {
   return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
 }
 
-/** Сколько дней месяца прошло к моменту now (текущий день считается прошедшим). Прошлый месяц — все дни, будущий — 0. */
+/**
+ * Сколько дней месяца уже прошло к моменту now — только завершённые дни, сегодняшний ещё идёт
+ * (утром 1-го числа ожидаемо 0, а не «отстаёт» при нулевом факте). Прошлый месяц — все дни, будущий — 0.
+ */
 export function elapsedDays(month, now = Date.now()) {
   const cur = moscowMonth(now);
   if (month < cur) return daysInMonth(month);
   if (month > cur) return 0;
-  return new Date(now + MSK).getUTCDate();
+  return new Date(now + MSK).getUTCDate() - 1;
 }
 
 /**

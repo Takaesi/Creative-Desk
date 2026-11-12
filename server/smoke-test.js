@@ -81,6 +81,27 @@ try {
     const r = await lead.get('/tasks');
     assert.ok(r.body.length >= 40);
   });
+  // проверки сида — до остальных тестов, которые сами создают и принимают креативы
+  await step('План: сид — нормы под темп: отстаёт ровно один, прошлый месяц не сплошь красный', async () => {
+    const items = (await lead.get('/plans')).body.items;
+    assert.ok(items.every((r) => r.plan && r.plan.norm > 0), JSON.stringify(items.map((r) => r.plan?.norm)));
+    const behind = items.filter((r) => r.plan.status === 'behind');
+    assert.equal(behind.length, 1, JSON.stringify(items.map((r) => [r.user.name, r.plan.fact, r.plan.norm, r.plan.status])));
+    assert.ok(behind[0].plan.behind_by <= Math.max(3, Math.ceil(behind[0].plan.expected * 0.25)), 'отставание лёгкое');
+    const prevItems = (await lead.get(`/plans?month=${shiftMonth(moscowMonth(), -1)}`)).body.items.filter((r) => r.plan);
+    assert.ok(prevItems.filter((r) => r.plan.status !== 'behind').length >= prevItems.length - 1, 'за прошлый месяц план выполнили почти все');
+    const rep = (await lead.get(`/plans/report?from=${shiftMonth(moscowMonth(), -1)}&to=${moscowMonth()}`)).body;
+    assert.equal(rep.months.length, 2);
+    assert.ok(rep.rows.every((r) => r.total.fact >= r.cells[1].fact));
+  });
+  await step('Сид: у каждого байера «Без результатов» — 3–5 креативов', async () => {
+    for (const email of ['buyer1@demo.ru', 'buyer2@demo.ru', 'buyer3@demo.ru']) {
+      const b = await as(email);
+      const a = ((await b.get('/queue')).body.blocks.find((x) => x.key === 'summary')).alerts.find((x) => x.key === 'need_results');
+      const v = a?.value ?? 0;
+      assert.ok(v >= 3 && v <= 5, `${email}: ${v}`);
+    }
+  });
   await step('неавторизованный доступ запрещён', async () => {
     assert.equal((await fetch(`${BASE}/tasks`)).status, 401);
   });
@@ -551,8 +572,8 @@ try {
   // ---------- План и норма креативщиков ----------
   await step('План: темп — опережает / в графике / отстаёт; месяц и «сегодня» по Москве', async () => {
     const at = (s) => Date.parse(s);
-    // 10 ноября 12:00 МСК: прошло 10 из 30 дней, при норме 30 ожидаемо 10
-    const now = at('2026-11-10T09:00:00Z');
+    // 11 ноября 12:00 МСК: завершилось 10 дней из 30, при норме 30 ожидаемо 10
+    const now = at('2026-11-11T09:00:00Z');
     assert.equal(planPace({ norm: 30, fact: 10, month: '2026-11', now }).status, 'ahead');
     assert.equal(planPace({ norm: 30, fact: 9, month: '2026-11', now }).status, 'on_track'); // 90 % ожидаемого
     const b = planPace({ norm: 30, fact: 8, month: '2026-11', now }); // 80 %
@@ -565,6 +586,7 @@ try {
     assert.deepEqual(monthBounds('2026-11'), ['2026-10-31T21:00:00.000Z', '2026-11-30T21:00:00.000Z']);
     assert.equal(elapsedDays('2026-10', now), 31, 'прошлый месяц — целиком');
     assert.equal(elapsedDays('2026-12', now), 0);
+    assert.equal(planPace({ norm: 30, fact: 0, month: '2026-11', now: at('2026-11-01T06:00:00Z') }).status, 'ahead', 'утром 1-го ожидаемо 0');
     assert.equal(shiftMonth('2026-12', 1), '2027-01');
   });
   const curMonth = moscowMonth();
@@ -585,14 +607,6 @@ try {
     // в истории изменения планов байер не видит
     const act = (await buyer.get('/activity?limit=500')).body;
     assert.ok(!act.some((h) => h.action === 'plan_changed'));
-  });
-  await step('План: сид — нормы 30–45, у кого-то отставание, есть запись на прошлый месяц', async () => {
-    const items = (await lead.get('/plans')).body.items;
-    assert.ok(items.every((r) => r.plan && r.plan.norm >= 30 && r.plan.norm <= 45), JSON.stringify(items.map((r) => r.plan?.norm)));
-    assert.ok(items.some((r) => r.plan.status === 'behind'));
-    const rep = (await lead.get(`/plans/report?from=${shiftMonth(curMonth, -1)}&to=${curMonth}`)).body;
-    assert.equal(rep.months.length, 2);
-    assert.ok(rep.rows.every((r) => r.cells[0].norm != null && r.total.fact >= r.cells[1].fact));
   });
   await step('План: факт — принятые в этом месяце по Москве итоговые версии; норма на месяц важнее нормы по умолчанию', async () => {
     const d = rawDb();
