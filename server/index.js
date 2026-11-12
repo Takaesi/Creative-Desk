@@ -11,6 +11,7 @@ import { wipInfo } from './workload.js';
 import templatesRouter from './routes/templates.js';
 import queueRouter from './routes/queue.js';
 import { HttpError, wrap, auth, requireRole, upload, fixName, publicUser, idOrNull } from './http.js';
+import plansRouter from './routes/plans.js';
 import dictionariesRouter, { findOffer, findApproach } from './routes/dictionaries.js';
 import creativesRouter, { getCreativeRow, shapeCreative } from './routes/creatives.js';
 import { submissionItems, createCreativesForSubmission, acceptTaskCreatives, migrateLegacyCreatives, code } from './creatives.js';
@@ -192,11 +193,12 @@ app.get('/api/meta', auth, (_req, res) => {
 
 app.get('/api/users', auth, (req, res) => {
   // ставки — денежные данные, отдаём только руководителю
-  const extra = req.user.role === 'lead' ? ', hourly_rate_rub, capacity_units, wip_limit' : ', capacity_units';
+  const extra = req.user.role === 'lead' ? ', hourly_rate_rub, capacity_units, wip_limit, monthly_norm' : ', capacity_units';
   res.json(db.prepare(`SELECT id, name, email, role, position, color${extra} FROM users ORDER BY role, name`).all());
 });
 
 app.use('/api', dictionariesRouter);
+app.use('/api', plansRouter);
 app.use('/api', creativesRouter);
 app.use('/api', templatesRouter);
 app.use('/api', queueRouter);
@@ -514,7 +516,9 @@ app.get('/api/activity', auth, wrap((req, res) => {
     `SELECT h.*, u.name AS user_name, u.color AS user_color, u.role AS user_role FROM history h LEFT JOIN users u ON u.id = h.user_id
      ORDER BY h.created_at DESC, h.id DESC LIMIT ?`
   ).all(limit);
-  res.json(rows.map((h) => ({ ...h, details: h.details ? JSON.parse(h.details) : null })));
+  res.json(rows.map((h) => ({ ...h, details: h.details ? JSON.parse(h.details) : null }))
+    // планы видит руководитель и сам креативщик, байер — нет
+    .filter((h) => h.action !== 'plan_changed' || req.user.role === 'lead' || h.details?.user_id === req.user.id));
 }));
 
 app.get('/api/analytics', auth, requireRole('lead'), wrap((req, res) => {

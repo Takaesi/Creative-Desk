@@ -233,12 +233,25 @@ CREATE TABLE IF NOT EXISTS creative_metrics (
   updated_at  TEXT NOT NULL,
   UNIQUE (creative_id, date)
 );
+
+CREATE TABLE IF NOT EXISTS creative_plans (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  month      TEXT NOT NULL CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'),
+  norm       INTEGER NOT NULL CHECK (norm > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (user_id, month)
+);
 `);
 
 addColumn('users', 'hourly_rate_rub', 'REAL NOT NULL DEFAULT 0');
 addColumn('users', 'capacity_units', 'INTEGER NOT NULL DEFAULT 10');
 addColumn('users', 'wip_limit', 'INTEGER');
 addColumn('users', 'telegram_chat_id', 'TEXT');
+addColumn('users', 'monthly_norm', 'INTEGER CHECK (monthly_norm IS NULL OR monthly_norm > 0)');
+// с какого месяца действует норма по умолчанию: раньше — только записи creative_plans
+addColumn('users', 'monthly_norm_from', 'TEXT');
 
 addColumn('tasks', 'offer_id', 'INTEGER REFERENCES offers(id)');
 addColumn('tasks', 'approach_id', 'INTEGER REFERENCES approaches(id)');

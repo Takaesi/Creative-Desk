@@ -6,6 +6,7 @@ import { allowedActions, isOverdue } from '../domain.js';
 import { wrap, auth } from '../http.js';
 import { queryCreatives, needResultsWhere, METRICS_CTE } from './creatives.js';
 import { wipInfo, teamLoad } from '../workload.js';
+import { planFor, planForAll } from '../plans.js';
 
 const router = Router();
 const H = 3600_000;
@@ -127,7 +128,7 @@ function leadBlocks(user, full) {
   const created = (w) => count('SELECT COUNT(*) c FROM tasks WHERE created_at >= ? AND created_at < ?', w);
   const submitted = (w) => count('SELECT COUNT(*) c FROM tasks WHERE first_submitted_at >= ? AND first_submitted_at < ?', w);
   const d1 = doneStats('1 = 1', {}, ...w1); const d0 = doneStats('1 = 1', {}, ...w0);
-  const plans = new Map(); // план месяца — шаг 2
+  const plans = planForAll(now);
   const load = teamLoad().map((u) => ({ kind: 'person', ...u, plan: plans.get(u.id) || null }));
   const problems = leadProblems(user, now);
   return [
@@ -163,7 +164,7 @@ function creativeBlocks(user, full) {
   const m30 = [now - 30 * DAY, now];
   const d = doneStats('creative_id = @me', me, ...m30);
   const submitted30 = db.prepare('SELECT COUNT(*) c FROM tasks WHERE creative_id = ? AND first_submitted_at >= ?').get(user.id, iso(m30[0])).c;
-  const plan = null; // план месяца — шаг 2
+  const plan = planFor(user.id, now);
   const tiles = [
     tile('in_work', 'В работе', wip.count, { hint: `лимит ${wip.limit}`, link: '/board?mine=1' }),
     tile('revisions', 'На правках', mine.filter((t) => t.status === 'revision').length, { link: '/board?mine=1' }),

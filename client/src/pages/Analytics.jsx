@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ListChecks, Activity as ActivityIcon, CheckCircle2, AlertTriangle, Timer, Hourglass, RotateCcw, Coins, Users, Clock } from 'lucide-react';
+import { ListChecks, Activity as ActivityIcon, CheckCircle2, AlertTriangle, Timer, Hourglass, RotateCcw, Coins, Users, Clock, Target } from 'lucide-react';
 import { api, qs } from '../api.js';
 import { STATUS, STATUS_ORDER, fmtDuration, fmtNum, fmtPct, fmtDay } from '../utils.js';
 import { Avatar, StatusBadge, Empty } from '../components/ui.jsx';
@@ -162,8 +162,62 @@ export default function Analytics() {
           </div>
         </>
       )}
+      <PlanFact />
       {tip && <div className="viz-tip" style={{ left: tip.x + 14, top: tip.y + 14 }}>{tip.content}</div>}
     </div>
+  );
+}
+
+const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+const mLabel = (m) => `${MONTHS_SHORT[Number(m.slice(5, 7)) - 1]} ${m.slice(2, 4)}`;
+const PACE_CLS = { ahead: 'pos', on_track: '', behind: 'neg' };
+
+/** План / факт по креативщикам за выбранные месяцы — независимо от периода сверху. */
+function PlanFact() {
+  const [range, setRange] = useState({ from: '', to: '' });
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    api.get(`/plans/report${qs(range)}`).then((r) => {
+      setD(r);
+      if (!range.from) setRange({ from: r.months[0], to: r.months[r.months.length - 1] });
+    }).catch(() => setD(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range.from, range.to]);
+  return (
+    <section className="panel mt plan-fact">
+      <div className="panel-head">
+        <h3 className="panel-title"><Target size={16} /> План / факт по креативщикам</h3>
+        <span className="period">
+          <input type="month" className="input input-sm" value={range.from} max={range.to} onChange={(e) => e.target.value && setRange({ ...range, from: e.target.value })} aria-label="С месяца" />
+          <span className="muted">—</span>
+          <input type="month" className="input input-sm" value={range.to} min={range.from} onChange={(e) => e.target.value && setRange({ ...range, to: e.target.value })} aria-label="По месяц" />
+        </span>
+      </div>
+      {d === false && <p className="muted small">Не удалось загрузить план</p>}
+      {d && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr><th>Креативщик</th>{d.months.map((m) => <th key={m} className="num">{mLabel(m)}</th>)}<th className="num">Итого</th></tr>
+            </thead>
+            <tbody>
+              {d.rows.map((r) => (
+                <tr key={r.user.id}>
+                  <td><span className="person"><Avatar name={r.user.name} color={r.user.color} size={20} />{r.user.name}</span></td>
+                  {r.cells.map((c) => (
+                    <td key={c.month} className={`num ${PACE_CLS[c.status] || ''}`} title={c.norm ? `факт ${c.fact} из нормы ${c.norm}` : 'норма не задана'}>
+                      {c.fact}{c.norm ? <span className="muted"> / {c.norm}</span> : ''}{c.pct != null && <small className="pf-pct"> {fmtNum(c.pct, 0)} %</small>}
+                    </td>
+                  ))}
+                  <td className="num"><b>{r.total.fact}</b>{r.total.norm ? <span className="muted"> / {r.total.norm}</span> : ''}{r.total.pct != null && <small className="pf-pct"> {fmtNum(r.total.pct, 0)} %</small>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="muted small mt">Факт — креативы, принятые в месяце (по Москве), без перекрытых версий. Цвет — темп: зелёный опережает, красный отстаёт; текущий месяц оценивается по прошедшим дням.</p>
+    </section>
   );
 }
 

@@ -455,6 +455,9 @@ function HistoryDetails({ h }) {
     return <small className="hist-extra">{h.creative_id ? <Link to={`/library/${h.creative_id}`}>{d.code}</Link> : d.code} · {d.date}{d.row ? ` · расход ${fmtNum(d.row.spend, 2)}, доход ${fmtNum(d.row.revenue, 2)}` : ''}</small>;
   }
   if (h.action === 'metrics_imported') return <small className="hist-extra">добавлено {d.added}, обновлено {d.updated} · креативов: {d.creatives.length}</small>;
+  if (h.action === 'plan_changed') {
+    return <small className="hist-extra">{d.user} · {d.month ? `норма на ${d.month}` : 'норма в месяц по умолчанию'}: {d.from ?? '∅'} → {d.to ?? '∅'}</small>;
+  }
   if (h.action === 'dictionary_changed') {
     return (
       <small className="hist-extra">

@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { db, nowIso, logHistory, getSettings, SETTINGS_SCHEMA } from '../db.js';
 import { CREATIVE_TYPES, GEOS, PRIORITIES, TYPE_UNITS } from '../domain.js';
 import { HttpError, wrap, auth, requireRole, num } from '../http.js';
+import { setDefaultNorm } from '../plans.js';
 
 const router = Router();
 
@@ -152,6 +153,17 @@ router.patch('/users/:id', auth, requireRole('lead'), wrap((req, res) => {
   if (req.body.hourly_rate_rub !== undefined) set.hourly_rate_rub = num(req.body.hourly_rate_rub, { label: 'Ставка', min: 0, max: 1e6 });
   if (req.body.capacity_units !== undefined) set.capacity_units = num(req.body.capacity_units, { label: 'Мощность', min: 1, max: 1000, int: true });
   if (req.body.wip_limit !== undefined) set.wip_limit = num(req.body.wip_limit, { label: 'WIP-лимит', min: 1, max: 50, int: true, nullable: true });
+  // норма по умолчанию — отдельной записью plan_changed (её видят только руководитель и сам креативщик)
+  if (req.body.monthly_norm !== undefined) {
+    if (u.role !== 'creative') throw new HttpError(400, 'Норма задаётся только креативщику');
+    const norm = num(req.body.monthly_norm, { label: 'Норма в месяц', min: 1, max: 10000, int: true, nullable: true });
+    if (norm !== u.monthly_norm) {
+      db.transaction(() => {
+        setDefaultNorm(u.id, norm);
+        logHistory({ userId: req.user.id, action: 'plan_changed', details: { user: u.name, user_id: u.id, month: null, from: u.monthly_norm, to: norm } });
+      })();
+    }
+  }
   const changes = Object.fromEntries(Object.entries(set).filter(([k, v]) => u[k] !== v).map(([k, v]) => [k, { from: u[k], to: v }]));
   if (Object.keys(changes).length) {
     db.transaction(() => {

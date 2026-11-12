@@ -11,6 +11,7 @@ import { detectBurnout, computeMetrics, suggestVerdict } from './metrics.js';
 import { scoreBrief } from '../shared/brief.js';
 import { buildSlotMap } from '../shared/slots.js';
 import { parseMetricsCsv } from './metrics.js';
+import { planPace, moscowMonth, monthBounds, elapsedDays, shiftMonth } from './plan-math.js';
 
 // Схема БД версии 1 (до v2) — для проверки миграции
 const OLD_SCHEMA = `
@@ -545,6 +546,104 @@ try {
     assert.ok(alert && alert.value > 0);
     const lib = (await buyer.get(`/creatives?${alert.link.split('?')[1]}&limit=200`)).body;
     assert.ok(lib.items.some((x) => x.id === c.id));
+  });
+
+  // ---------- План и норма креативщиков ----------
+  await step('План: темп — опережает / в графике / отстаёт; месяц и «сегодня» по Москве', async () => {
+    const at = (s) => Date.parse(s);
+    // 10 ноября 12:00 МСК: прошло 10 из 30 дней, при норме 30 ожидаемо 10
+    const now = at('2026-11-10T09:00:00Z');
+    assert.equal(planPace({ norm: 30, fact: 10, month: '2026-11', now }).status, 'ahead');
+    assert.equal(planPace({ norm: 30, fact: 9, month: '2026-11', now }).status, 'on_track'); // 90 % ожидаемого
+    const b = planPace({ norm: 30, fact: 8, month: '2026-11', now }); // 80 %
+    assert.equal(b.status, 'behind');
+    assert.equal(b.behind_by, 2);
+    assert.equal(planPace({ norm: 40, fact: 24, month: '2026-11', now: at('2026-11-30T12:00:00Z') }).pct, 60);
+    // граница месяца по Москве: 31.10 22:30 UTC — это уже 1 ноября в Москве
+    assert.equal(moscowMonth(at('2026-10-31T22:30:00Z')), '2026-11');
+    assert.equal(moscowMonth(at('2026-10-31T20:30:00Z')), '2026-10');
+    assert.deepEqual(monthBounds('2026-11'), ['2026-10-31T21:00:00.000Z', '2026-11-30T21:00:00.000Z']);
+    assert.equal(elapsedDays('2026-10', now), 31, 'прошлый месяц — целиком');
+    assert.equal(elapsedDays('2026-12', now), 0);
+    assert.equal(shiftMonth('2026-12', 1), '2027-01');
+  });
+  const curMonth = moscowMonth();
+  const nextMonth = shiftMonth(curMonth, 1);
+  await step('План: права — нормы меняет только lead; креативщик видит только свой план; байер не видит', async () => {
+    const all = (await lead.get('/plans')).body;
+    assert.equal(all.month, curMonth);
+    assert.ok(all.items.length >= 4);
+    const mine = (await cr.get('/plans')).body.items;
+    assert.equal(mine.length, 1);
+    assert.equal(mine[0].user.id, 8);
+    assert.equal((await buyer.get('/plans')).status, 403);
+    assert.equal((await cr.put(`/plans/8/${curMonth}`, { norm: 5 })).status, 403);
+    assert.equal((await buyer.patch('/users/8', { monthly_norm: 5 })).status, 403);
+    assert.equal((await lead.put(`/plans/8/${shiftMonth(curMonth, -1)}`, { norm: 5 })).status, 400, 'прошлый месяц не меняется');
+    assert.equal((await lead.put(`/plans/8/${curMonth}`, { norm: 0 })).status, 400);
+    assert.equal((await lead.put('/plans/8/2026-13', { norm: 5 })).status, 400);
+    // в истории изменения планов байер не видит
+    const act = (await buyer.get('/activity?limit=500')).body;
+    assert.ok(!act.some((h) => h.action === 'plan_changed'));
+  });
+  await step('План: сид — нормы 30–45, у кого-то отставание, есть запись на прошлый месяц', async () => {
+    const items = (await lead.get('/plans')).body.items;
+    assert.ok(items.every((r) => r.plan && r.plan.norm >= 30 && r.plan.norm <= 45), JSON.stringify(items.map((r) => r.plan?.norm)));
+    assert.ok(items.some((r) => r.plan.status === 'behind'));
+    const rep = (await lead.get(`/plans/report?from=${shiftMonth(curMonth, -1)}&to=${curMonth}`)).body;
+    assert.equal(rep.months.length, 2);
+    assert.ok(rep.rows.every((r) => r.cells[0].norm != null && r.total.fact >= r.cells[1].fact));
+  });
+  await step('План: факт — принятые в этом месяце по Москве итоговые версии; норма на месяц важнее нормы по умолчанию', async () => {
+    const d = rawDb();
+    const mine = d.prepare("SELECT id FROM creatives WHERE author_id = 8 AND status NOT IN ('superseded','draft') AND accepted_at IS NOT NULL ORDER BY id LIMIT 3").all().map((r) => r.id);
+    const sup = d.prepare("SELECT id FROM creatives WHERE author_id = 8 AND status = 'superseded' LIMIT 1").get();
+    const [from] = monthBounds(curMonth);
+    // ровно на границе месяца по Москве и за минуту до неё
+    d.prepare('UPDATE creatives SET accepted_at = ? WHERE id = ?').run(from, mine[0]);
+    d.prepare('UPDATE creatives SET accepted_at = ? WHERE id = ?').run(new Date(Date.parse(from) - 60_000).toISOString(), mine[1]);
+    if (sup) d.prepare('UPDATE creatives SET accepted_at = ? WHERE id = ?').run(new Date().toISOString(), sup.id);
+    const expect = d.prepare(`SELECT COUNT(*) c FROM creatives WHERE author_id = 8 AND accepted_at >= ? AND accepted_at < ? AND status NOT IN ('superseded','draft')`).get(...monthBounds(curMonth)).c;
+    d.close();
+    const p = (await cr.get('/plans')).body.items[0];
+    assert.equal(p.fact, expect);
+    assert.equal((await lead.patch('/users/8', { monthly_norm: 40 })).status, 200);
+    assert.equal((await cr.get('/plans')).body.items[0].plan.norm, 40);
+    assert.equal((await lead.put(`/plans/8/${curMonth}`, { norm: 25 })).status, 200);
+    let mp = (await cr.get('/plans')).body.items[0];
+    assert.equal(mp.plan.norm, 25);
+    assert.equal(mp.plan.source, 'month');
+    // норма на месяц убрана — снова действует норма по умолчанию
+    await lead.put(`/plans/8/${curMonth}`, { norm: null });
+    mp = (await cr.get('/plans')).body.items[0];
+    assert.equal(mp.plan.norm, 40);
+    // на следующий месяц своя запись, текущий не трогает
+    await lead.put(`/plans/8/${nextMonth}`, { norm: 33 });
+    assert.equal((await cr.get(`/plans?month=${nextMonth}`)).body.items[0].plan.norm, 33);
+    assert.equal((await cr.get('/plans')).body.items[0].plan.norm, 40);
+  });
+  await step('План: смена нормы по умолчанию не переписывает прошлые месяцы; до её введения нормы нет', async () => {
+    const prev2 = shiftMonth(curMonth, -2);
+    const prev3 = shiftMonth(curMonth, -3);
+    const d = rawDb();
+    d.prepare('DELETE FROM creative_plans WHERE user_id = 8 AND month IN (?, ?)').run(prev2, shiftMonth(curMonth, -1));
+    // будто норму 40 задали два месяца назад
+    d.prepare('UPDATE users SET monthly_norm_from = ? WHERE id = 8').run(prev2);
+    d.close();
+    assert.equal((await cr.get(`/plans?month=${prev2}`)).body.items[0].plan.norm, 40, 'прошлый месяц без записи берёт норму по умолчанию');
+    assert.equal((await cr.get(`/plans?month=${prev3}`)).body.items[0].plan, null, 'до введения нормы плана нет');
+    await lead.patch('/users/8', { monthly_norm: 44 });
+    assert.equal((await cr.get(`/plans?month=${prev2}`)).body.items[0].plan.norm, 40, 'прошлый месяц сохранил старую норму');
+    assert.equal((await cr.get(`/plans?month=${shiftMonth(curMonth, -1)}`)).body.items[0].plan.norm, 40);
+    assert.equal((await cr.get(`/plans?month=${prev3}`)).body.items[0].plan, null);
+    assert.equal((await cr.get('/plans')).body.items[0].plan.norm, 44);
+  });
+  await step('План: на дашбордах — плитка у креативщика, строка «Нагрузка» у руководителя, байер не видит', async () => {
+    const t = (await qBlock(cr, 'summary')).tiles.find((x) => x.key === 'plan');
+    assert.ok(t && t.plan.norm === 44 && ['ahead', 'on_track', 'behind'].includes(t.plan.status));
+    const row = (await qBlock(lead, 'load')).items.find((u) => u.id === 8);
+    assert.equal(row.plan.norm, 44);
+    assert.ok(!JSON.stringify((await buyer.get('/queue')).body).includes('"plan"'));
   });
 
   // ---------- F6: шаблоны и качество ТЗ ----------

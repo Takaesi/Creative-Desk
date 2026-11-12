@@ -46,6 +46,7 @@ export const ACTION_LABEL = {
   metrics_deleted: 'удалил(а) результаты за день',
   metrics_imported: 'импортировал(а) результаты из CSV',
   template_changed: 'изменил(а) шаблон ТЗ',
+  plan_changed: 'изменил(а) план креативщика',
 };
 
 export const FIELD_LABEL = {

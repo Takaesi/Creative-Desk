@@ -171,37 +171,76 @@ function AiServices() {
   );
 }
 
+const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+export const monthLabel = (m) => (m ? `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}` : '');
+const nextMonthOf = (m) => { const [y, mo] = m.split('-').map(Number); return mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`; };
+
 function Team() {
   const { dicts } = useDicts();
   const save = useSave();
   const [users, setUsers] = useState(null);
-  const load = () => api.get('/users').then(setUsers).catch(() => setUsers([]));
+  const [plans, setPlans] = useState(null); // { [month]: { [userId]: row } }
+  const load = async () => {
+    try {
+      const [us, cur] = await Promise.all([api.get('/users'), api.get('/plans')]);
+      const next = await api.get(`/plans?month=${nextMonthOf(cur.current)}`);
+      setUsers(us);
+      setPlans({ months: [cur.current, next.month], [cur.current]: byUser(cur.items), [next.month]: byUser(next.items) });
+    } catch { setUsers([]); }
+  };
   useEffect(() => { load(); }, []);
-  if (!users || !dicts) return <div className="splash small"><div className="spinner" /></div>;
-  const upd = (u, patch) => save(async () => { await api.patch(`/users/${u.id}`, patch); load(); });
+  if (!users || !dicts || !plans) return <div className="splash small"><div className="spinner" /></div>;
+  const upd = (u, patch) => save(async () => { await api.patch(`/users/${u.id}`, patch); await load(); });
+  const setMonth = (u, month, v) => save(async () => { await api.put(`/plans/${u.id}/${month}`, { norm: v === '' ? null : v }); await load(); }, 'План обновлён');
   const def = dicts.settings.wip_limit_default;
+  const dash = <span className="muted">—</span>;
   return (
     <section className="panel">
       <div className="table-wrap">
         <table className="table">
-          <thead><tr><th>Сотрудник</th><th>Роль</th><th>Ставка</th><th>Мощность</th><th>WIP-лимит</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Сотрудник</th><th>Роль</th><th>Ставка</th><th>Мощность</th><th>WIP-лимит</th><th>Норма в месяц</th>
+              {plans.months.map((m) => <th key={m}>Норма на {monthLabel(m)}</th>)}
+            </tr>
+          </thead>
           <tbody>
-            {users.map((u) => (
-              <tr key={u.id}>
-                <td><span className="person"><Avatar name={u.name} color={u.color} size={26} /><span><b>{u.name}</b><small className="muted">{u.position}</small></span></span></td>
-                <td>{ROLE[u.role]}</td>
-                <td>{u.role === 'creative' ? <EditCell type="number" min={0} step={50} value={u.hourly_rate_rub} suffix=" ₽/ч" onSave={(v) => upd(u, { hourly_rate_rub: v === '' ? 0 : v })} /> : <span className="muted">—</span>}</td>
-                <td>{u.role === 'creative' ? <EditCell type="number" min={1} step={1} value={u.capacity_units} suffix=" units" onSave={(v) => upd(u, { capacity_units: v })} /> : <span className="muted">—</span>}</td>
-                <td>{u.role === 'creative' ? <EditCell type="number" min={1} step={1} value={u.wip_limit} placeholder={`по умолчанию (${def})`} onSave={(v) => upd(u, { wip_limit: v === '' ? null : v })} /> : <span className="muted">—</span>}</td>
-              </tr>
-            ))}
+            {users.map((u) => {
+              const isCr = u.role === 'creative';
+              return (
+                <tr key={u.id}>
+                  <td><span className="person"><Avatar name={u.name} color={u.color} size={26} /><span><b>{u.name}</b><small className="muted">{u.position}</small></span></span></td>
+                  <td>{ROLE[u.role]}</td>
+                  <td>{isCr ? <EditCell type="number" min={0} step={50} value={u.hourly_rate_rub} suffix=" ₽/ч" onSave={(v) => upd(u, { hourly_rate_rub: v === '' ? 0 : v })} /> : dash}</td>
+                  <td>{isCr ? <EditCell type="number" min={1} step={1} value={u.capacity_units} suffix=" units" onSave={(v) => upd(u, { capacity_units: v })} /> : dash}</td>
+                  <td>{isCr ? <EditCell type="number" min={1} step={1} value={u.wip_limit} placeholder={`по умолчанию (${def})`} onSave={(v) => upd(u, { wip_limit: v === '' ? null : v })} /> : dash}</td>
+                  <td data-col="monthly_norm">{isCr ? <EditCell type="number" min={1} step={1} value={u.monthly_norm} suffix=" кр." placeholder="не задана" onSave={(v) => upd(u, { monthly_norm: v === '' ? null : v })} /> : dash}</td>
+                  {plans.months.map((m) => {
+                    const r = plans[m][u.id];
+                    const own = r?.norm_source === 'month';
+                    return (
+                      <td key={m} data-col={`plan-${m}`}>
+                        {isCr ? (
+                          <EditCell type="number" min={1} step={1} value={own ? r.plan.norm : ''} suffix=" кр."
+                            placeholder={u.monthly_norm ? `как обычно (${u.monthly_norm})` : 'не задана'} onSave={(v) => setMonth(u, m, v)} />
+                        ) : dash}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
-      <p className="muted small mt">Ставка — для себестоимости креатива. Мощность — сколько единиц трудоёмкости человек держит одновременно. WIP-лимит — максимум задач в работе.</p>
+      <p className="muted small mt">
+        Ставка — для себестоимости креатива. Мощность — сколько единиц трудоёмкости человек держит одновременно. WIP-лимит — максимум задач в работе.
+        Норма — сколько креативов принять за месяц; норма на конкретный месяц важнее обычной (очистите поле, чтобы вернуть обычную). Прошлые месяцы не меняются.
+      </p>
     </section>
   );
 }
+const byUser = (items) => Object.fromEntries(items.map((r) => [r.user.id, r]));
 
 const THRESHOLDS = [
   { k: 'verdict_winner_roi', pre: 'Креатив считается победителем, если ROI ≥', post: '%' },

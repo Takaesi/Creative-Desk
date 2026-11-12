@@ -8,6 +8,7 @@ import { db, UPLOAD_DIR, SETTINGS_SCHEMA, getSettings } from './db.js';
 import { defaultUnits, scoreBrief } from './domain.js';
 import { createCreativesForSubmission, acceptTaskCreatives, latestSlots, refreshCreativeAfterMetrics, setCreativeStatus } from './creatives.js';
 import { computeMetrics } from './metrics.js';
+import { moscowMonth, shiftMonth, factFor, elapsedDays, daysInMonth } from './plans.js';
 
 const H = 3600_000;
 const DEMO_PASSWORD = 'demo123';
@@ -117,7 +118,7 @@ export function seed() {
     // старые загруженные файлы демо больше не нужны
     for (const f of db.prepare('SELECT stored_name FROM files').all()) fs.rmSync(path.join(UPLOAD_DIR, f.stored_name), { force: true });
     db.exec('UPDATE tasks SET parent_creative_id = NULL, template_id = NULL');
-    for (const t of ['history', 'creative_metrics', 'creatives', 'comments', 'ai_expenses', 'files', 'submissions', 'tasks', 'brief_templates',
+    for (const t of ['creative_plans', 'history', 'creative_metrics', 'creatives', 'comments', 'ai_expenses', 'files', 'submissions', 'tasks', 'brief_templates',
       'sessions', 'users', 'offers', 'approaches', 'ai_services', 'settings']) db.exec(`DELETE FROM ${t}`);
     db.exec("DELETE FROM sqlite_sequence");
 
@@ -301,7 +302,34 @@ export function seed() {
     enforceWipLimits(creatives);
     seedResults({ rand, between, iso, now, insTask, insHist, seedSubmit, lead });
     seedTemplates({ lead, buyers, offerIds, approachIds, iso, now });
+    seedPlans(now);
   })();
+}
+
+/**
+ * Нормы 30–45 в месяц. Факт к сегодняшнему дню зависит от даты запуска, поэтому норму подбираем под темп:
+ * у креативщика с наименьшим фактом — отставание, у остальных — «в графике» или «опережает».
+ * Прошлый месяц сохраняется отдельной записью — видно историю в аналитике.
+ */
+function seedPlans(now) {
+  const month = moscowMonth(now);
+  const prev = shiftMonth(month, -1);
+  const at = new Date(now).toISOString();
+  const ins = db.prepare('INSERT INTO creative_plans (user_id, month, norm, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
+  const people = db.prepare("SELECT id FROM users WHERE role = 'creative' ORDER BY id").all()
+    .map((u) => ({ id: u.id, fact: factFor(u.id, month), prevFact: factFor(u.id, prev) }))
+    .sort((a, b) => a.fact - b.fact);
+  const share = elapsedDays(month, now) / daysInMonth(month);
+  const clamp = (n) => Math.max(30, Math.min(45, Math.round(n)));
+  people.forEach((p, i) => {
+    // целевое отношение факта к ожидаемому: 0.6 — отстаёт, 0.92 — в графике, 1.15 — опережает
+    const ratio = i === 0 ? 0.6 : i % 2 ? 0.92 : 1.15;
+    const norm = i === 0 ? 45 : clamp(share > 0 ? p.fact / (share * ratio) : 40);
+    db.prepare('UPDATE users SET monthly_norm = ?, monthly_norm_from = ? WHERE id = ?').run(norm, month, p.id);
+    ins.run(p.id, prev, clamp(p.prevFact * (i === 0 ? 1.25 : 0.95)), at, at);
+  });
+  // у одного — отдельная норма на следующий месяц (отпуск)
+  ins.run(people[people.length - 1].id, shiftMonth(month, 1), 30, at, at);
 }
 
 /**

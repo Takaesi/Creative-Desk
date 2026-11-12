@@ -801,3 +801,10 @@ a.q-tile:hover { text-decoration: none; border-color: var(--accent); }
   .q-load-bar { grid-column: 1 / -1; grid-row: 2; }
   .q-load-plan { grid-column: 1 / -1; text-align: left; }
 }
+
+/* план / факт */
+.plan-fact .panel-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.plan-fact .panel-title { display: inline-flex; gap: 6px; align-items: center; margin: 0; }
+.plan-fact .period { display: inline-flex; gap: 6px; align-items: center; }
+.pf-pct { color: inherit; opacity: .8; }
+td.pos, td.neg { font-weight: 600; }
