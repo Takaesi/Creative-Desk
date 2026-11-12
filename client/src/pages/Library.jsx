@@ -10,7 +10,7 @@ import { CreativeCard } from '../components/creative.jsx';
 import ImportDialog from '../components/ImportDialog.jsx';
 import { useNewTask } from '../newTask.jsx';
 
-const FILTER_KEYS = ['q', 'offer_id', 'geo', 'type', 'approach_id', 'author_id', 'buyer_id', 'status', 'from', 'to', 'sort', 'all', 'burnout', 'parent_id'];
+const FILTER_KEYS = ['q', 'offer_id', 'geo', 'type', 'approach_id', 'author_id', 'buyer_id', 'status', 'from', 'to', 'sort', 'all', 'burnout', 'parent_id', 'need'];
 const SORTS = [{ k: 'new', label: 'Новые' }, { k: 'roi', label: 'ROI ↓' }, { k: 'spend', label: 'Расход ↓' }, { k: 'ctr', label: 'CTR ↓' }];
 const PAGE = 60;
 
@@ -127,6 +127,7 @@ export default function Library() {
           <input type="checkbox" checked={!!f.all} onChange={(e) => setF({ all: e.target.checked ? '1' : '', status: '' })} /><i /> <span>Показать черновики и архив</span>
         </label>
         {f.burnout && <button className="chip chip-on" onClick={() => setF({ burnout: '' })}>Только выгорающие <X size={12} /></button>}
+        {f.need && <button className="chip chip-on" onClick={() => setF({ need: '' })}>{f.need === 'verdict' ? 'Ждут вердикта' : 'Без результатов'} <X size={12} /></button>}
         {f.parent_id && <button className="chip chip-on" onClick={() => setF({ parent_id: '' })}>Вариации CD-{f.parent_id} <X size={12} /></button>}
         <span className="spacer" />
         <div className="segmented">

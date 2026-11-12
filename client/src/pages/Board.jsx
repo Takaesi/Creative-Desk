@@ -28,10 +28,15 @@ export default function Board() {
   const [loading, setLoading] = useState(true);
   const [meta, setMeta] = useState(null);
   const [users, setUsers] = useState([]);
-  const [filters, setFilters] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('board-filters')) || {}; } catch { return {}; }
-  });
   const location = useLocation();
+  const [filters, setFilters] = useState(() => {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('board-filters')) || {}; } catch { /* ignore */ }
+    // переход с плитки дашборда: /board?mine=1 — фильтр из ссылки важнее сохранённого
+    const p = new URLSearchParams(location.search);
+    if (p.has('mine')) return { mine: p.get('mine') === '1' };
+    return saved;
+  });
   // действие, с которым пришли из «Моей очереди» (Сдать / Открыть / Назначить)
   const [intent, setIntent] = useState(location.state?.intent || null);
   const [dragOver, setDragOver] = useState(null);

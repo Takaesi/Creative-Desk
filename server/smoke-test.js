@@ -446,13 +446,47 @@ try {
 
   // ---------- F5: «Моя очередь» ----------
   const rawDb = () => new Database(path.join(dataDir, 'app.db'));
-  await step('F5: очередь отдаёт фиксированные блоки для каждой роли', async () => {
+  const qBlock = async (who, key, full = false) => (await who.get(`/queue${full ? '?full=1' : ''}`)).body.blocks.find((x) => x.key === key);
+  await step('F5: дашборд — ровно 3 блока на роль, в списках не больше 7 строк', async () => {
     const keys = async (who) => (await who.get('/queue')).body.blocks.map((b) => b.key);
-    assert.deepEqual(await keys(cr), ['revisions_waiting', 'in_work', 'available', 'my_stats']);
-    assert.deepEqual(await keys(buyer), ['to_review', 'burning', 'need_results', 'need_verdict', 'my_tasks', 'recent_winners']);
-    assert.deepEqual(await keys(lead), ['overdue', 'urgent_unassigned', 'stuck_review', 'load_issues', 'team_burning', 'week_kpi']);
-    const b = (await buyer.get('/queue')).body.blocks.find((x) => x.key === 'to_review');
-    assert.ok(b.items.length <= 5 && b.count >= b.items.length);
+    assert.deepEqual(await keys(cr), ['summary', 'my_tasks', 'available']);
+    assert.deepEqual(await keys(buyer), ['summary', 'my_tasks', 'to_review']);
+    assert.deepEqual(await keys(lead), ['summary', 'load', 'problems']);
+    for (const who of [cr, buyer, lead]) {
+      for (const b of (await who.get('/queue')).body.blocks.filter((x) => x.kind === 'list')) {
+        assert.ok(b.items.length <= 7 && b.count >= b.items.length, `${b.key}: ${b.items.length}/${b.count}`);
+      }
+    }
+    const all = await qBlock(cr, 'available', true);
+    assert.equal(all.items.length, all.count, '?full=1 отдаёт все строки');
+  });
+  await step('F5: сводка байера — 5 плиток, предупреждения только при числе > 0, ссылки с фильтром', async () => {
+    const s = await qBlock(buyer, 'summary');
+    assert.deepEqual(s.tiles.map((t) => t.key), ['in_work', 'to_review', 'in_test', 'winners', 'roi']);
+    assert.ok(s.alerts.every((a) => a.value > 0 && ['burning', 'need_verdict', 'need_results'].includes(a.key)));
+    const toReview = await qBlock(buyer, 'to_review', true);
+    assert.equal(s.tiles.find((t) => t.key === 'to_review').value, toReview.count);
+    // число на плитке совпадает с тем, что покажет библиотека по ссылке
+    for (const a of s.alerts) {
+      const q = a.link.split('?')[1];
+      assert.equal((await buyer.get(`/creatives?${q}&limit=200`)).body.total, a.value, a.key);
+    }
+  });
+  await step('F5: сводка руководителя сравнивается с прошлой неделей; нагрузка — по всем креативщикам', async () => {
+    const s = await qBlock(lead, 'summary');
+    assert.deepEqual(s.tiles.map((t) => t.key), ['created', 'submitted', 'on_time', 'revisions', 'winners', 'ai_rub']);
+    assert.ok(s.tiles.every((t) => 'prev' in t));
+    const load = await qBlock(lead, 'load');
+    const d = rawDb(); const n = d.prepare("SELECT COUNT(*) c FROM users WHERE role = 'creative'").get().c; d.close();
+    assert.equal(load.items.length, n);
+    assert.ok(load.items.every((u) => u.capacity_units > 0 && u.wip_limit > 0));
+  });
+  await step('F5: креативщик — сначала правки, потом задачи в работе', async () => {
+    const mine = (await qBlock(cr, 'my_tasks', true)).items;
+    const firstWork = mine.findIndex((t) => t.status !== 'revision');
+    assert.ok(firstWork === -1 || mine.slice(firstWork).every((t) => t.status !== 'revision'));
+    assert.ok(mine.every((t) => t.creative_id !== undefined));
+    assert.deepEqual((await qBlock(cr, 'summary')).tiles.slice(0, 5).map((t) => t.key), ['in_work', 'revisions', 'submitted', 'on_time', 'winners']);
   });
   await step('Сид соблюдает WIP-лимиты, у одного креативщика лимит 2', async () => {
     const d = rawDb();
@@ -466,7 +500,7 @@ try {
   });
   await step('F5/F8: WIP-лимит — взять новую нельзя (409, кнопка неактивна), начать правки можно', async () => {
     const cr3 = await as('creative3@demo.ru'); // лимит 2 из демо-данных, лимиты в тесте не меняем
-    const wipNow = async () => (await cr3.get('/queue')).body.blocks.find((x) => x.key === 'available').wip;
+    const wipNow = async () => (await qBlock(cr3, 'available')).wip;
     let w = await wipNow();
     assert.equal(w.limit, 2);
     assert.ok(w.count < w.limit, 'в демо у креативщика есть свободный слот');
@@ -483,25 +517,34 @@ try {
     assert.equal(r.status, 409);
     assert.match(r.body.error, /лимит/);
     assert.ok((await cr3.get('/tasks')).body.find((t) => t.id === c).take_blocked, 'на доске кнопка неактивна');
-    const avail = (await cr3.get('/queue')).body.blocks.find((x) => x.key === 'available');
+    const avail = await qBlock(cr3, 'available', true);
     assert.ok(avail.wip.reached && avail.items.every((t) => t.take_blocked));
     assert.equal((await cr3.post(`/tasks/${a}/take`)).status, 200, 'правки своей задачи — всегда, даже на лимите');
   });
-  await step('F5: задача на проверке > 24 ч — у руководителя в «Зависло на проверке»', async () => {
+  await step('F5: задача на проверке > 24 ч — в «Проблемах» руководителя с меткой «Зависла на проверке»', async () => {
     const tid = await newTask();
     await cr2.post(`/tasks/${tid}/take`);
     await submit(cr2, tid, { links: 'https://x.com/s' });
     const d = rawDb(); d.prepare('UPDATE tasks SET submitted_at = ? WHERE id = ?').run(new Date(Date.now() - 30 * 3600_000).toISOString(), tid); d.close();
-    const stuck = (await lead.get('/queue?full=1')).body.blocks.find((x) => x.key === 'stuck_review');
-    assert.ok(stuck.items.some((t) => t.id === tid));
-    const fresh = (await lead.get('/queue?full=1')).body.blocks.find((x) => x.key === 'stuck_review');
-    assert.ok(fresh.items.every((t) => t.waiting_ms > 24 * 3600_000), 'свежие сдачи туда не попадают');
+    const pr = (await qBlock(lead, 'problems', true)).items;
+    const p = pr.find((x) => x.type === 'stuck' && x.id === tid);
+    assert.ok(p && p.label === 'Зависла на проверке');
+    assert.ok(pr.filter((x) => x.type === 'stuck').every((x) => x.ms > 24 * 3600_000), 'свежие сдачи туда не попадают');
+    // сначала самые срочные: просрочки выше всех остальных типов
+    const order = ['overdue', 'urgent', 'stuck', 'overload', 'burnout'];
+    const ranks = pr.map((x) => order.indexOf(x.type));
+    assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b));
+    // у байера — «ждёт больше суток»
+    const tr = (await qBlock(buyer, 'to_review', true)).items.find((t) => t.id === tid);
+    assert.ok(tr.waiting_ms > 24 * 3600_000);
   });
-  await step('F5: принятый 4 дня назад креатив без метрик — у байера в «Внесите результаты»', async () => {
+  await step('F5: принятый 4 дня назад креатив без метрик — в плитке «Без результатов» и в фильтре библиотеки', async () => {
     const c = (await crsOf(flowTask)).find((x) => x.slot === 1 && x.version === 2);
     const d = rawDb(); d.prepare('UPDATE creatives SET accepted_at = ? WHERE id = ?').run(new Date(Date.now() - 4 * 86400000).toISOString(), c.id); d.close();
-    const block = (await buyer.get('/queue?full=1')).body.blocks.find((x) => x.key === 'need_results');
-    assert.ok(block.items.some((x) => x.id === c.id));
+    const alert = (await qBlock(buyer, 'summary')).alerts.find((a) => a.key === 'need_results');
+    assert.ok(alert && alert.value > 0);
+    const lib = (await buyer.get(`/creatives?${alert.link.split('?')[1]}&limit=200`)).body;
+    assert.ok(lib.items.some((x) => x.id === c.id));
   });
 
   // ---------- F6: шаблоны и качество ТЗ ----------

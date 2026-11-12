@@ -9,7 +9,7 @@ import { setCreativeStatus, CreativeError, code, refreshCreativeAfterMetrics } f
 
 const router = Router();
 
-const METRICS_CTE = `WITH m AS (
+export const METRICS_CTE = `WITH m AS (
   SELECT creative_id, SUM(impressions) AS impressions, SUM(clicks) AS clicks, SUM(conversions) AS conversions,
          SUM(spend) AS spend, SUM(revenue) AS revenue, COUNT(*) AS metric_days, MAX(date) AS last_metric_date
   FROM creative_metrics GROUP BY creative_id)`;
@@ -61,6 +61,14 @@ export function shapeCreative(c) {
   };
 }
 
+/** Принят N дней назад без метрик или в тесте без свежих данных 3+ дня. */
+export function needResultsWhere(now = Date.now()) {
+  return {
+    sql: "((c.status = 'accepted' AND c.accepted_at < @nr_acc AND m.metric_days IS NULL) OR (c.status = 'in_test' AND m.last_metric_date <= @nr_stale))",
+    params: { nr_acc: new Date(now - getSettings().no_results_reminder_days * 86400000).toISOString(), nr_stale: new Date(now - 3 * 86400000).toISOString().slice(0, 10) },
+  };
+}
+
 /** WHERE по фильтрам библиотеки. По умолчанию прячем черновики, перекрытые версии и архив. */
 function libraryWhere(q) {
   const where = [];
@@ -77,6 +85,9 @@ function libraryWhere(q) {
   if (q.from) add('c.created_at >= @from', 'from', new Date(q.from).toISOString());
   if (q.to) add('c.created_at <= @to', 'to', new Date(Date.parse(q.to) + 86400000 - 1).toISOString());
   if (q.burnout === '1') where.push('c.burnout_detected_at IS NOT NULL');
+  // need=verdict / need=results — те же условия, что у плиток-предупреждений в «Моей очереди»
+  if (q.need === 'verdict') where.push("c.status = 'in_test' AND c.suggested_verdict IS NOT NULL");
+  if (q.need === 'results') { const nr = needResultsWhere(); where.push(nr.sql); Object.assign(p, nr.params); }
   if (q.q) {
     const m = String(q.q).match(/^\s*(?:CD-)?(\d+)\s*$/i);
     where.push(`(c.title LIKE @q OR c.tags LIKE @q${m ? ' OR c.id = @qid' : ''})`);
